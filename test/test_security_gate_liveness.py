@@ -108,12 +108,35 @@ def _url_payload_command(n: int) -> str:
 #: halves now loop the same tuple, each leaf's tail is spelled once, and a test adds a
 #: probe leaf and asserts BOTH spellings refuse -- it fails on the old code.
 #:
+#: Raised again for modelling ``${...}`` parameter expansion and ``#`` comments in the
+#: shell-char walk: a literal ``)`` inside either construct must not close a ``$(...)``
+#: substitution span, so ``_iter_shell_chars`` gains two syntax branches and their
+#: regression pins. The expansion interior also reports its own single/double-quote
+#: state and nests only on ``${`` (a bare ``{`` is an ordinary character), so the
+#: program-anchor walk reads a quoted ``$(`` as data and does not run the span past the
+#: ``}`` bash closes at -- control logic that keeps a nested publish from hiding below a
+#: truncated span, not machinery.
+#:
+#: Raised again for the ``${...}`` interior scanners. The interior is read by three
+#: small self-contained functions rather than an inline loop: ``_expansion_span`` finds
+#: the closing ``}`` (quote-aware, nesting only on ``${``), ``_skip_nested_substitution``
+#: skips a nested ``$(...)`` / backtick whole so a ``}`` inside one is inert to the
+#: expansion's brace depth, and ``_yield_expansion`` emits the span. They handle nesting
+#: BY CONSTRUCTION, and count an unclosed nested ``$(``'s ``(`` so a token-cut expansion
+#: does not zero the paren delta. They do not call the boundary walker
+#: ``_matching_close_paren`` -- it is a consumer of this generator, so calling it here
+#: recurses. ``_skip_nested_substitution`` counts nesting with a ``depth`` counter and a
+#: backtick-context flag in one loop, so a deeply nested ``$(`` costs an integer bump,
+#: not a Python stack frame or a re-scan -- ``is_denied`` returns a decision instead of
+#: raising ``RecursionError`` on attacker-chosen depth. The added lines are that control
+#: logic plus its regression pins and docstrings, not machinery.
+#:
 #: The number IS the package's measured total, carrying no spare room: a ratchet with
 #: headroom admits exactly the unreviewed growth it exists to catch, so the next line
 #: added here fails this gate and has to be re-pinned deliberately, with its reason
 #: written above. The guards that detect a monolith growing back are the per-file cap
 #: and the facade's share below, and both must stay untouched.
-_PACKAGE_LINE_BUDGET = 27_853
+_PACKAGE_LINE_BUDGET = 28_118
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

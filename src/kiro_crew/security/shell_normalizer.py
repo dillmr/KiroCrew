@@ -2064,6 +2064,188 @@ class _ShellChar(NamedTuple):
     trailing_escape: bool
 
 
+def _skip_nested_substitution(text: str, start: int) -> "int | None":
+    """Index just past a nested ``$(...)`` or ``` `...` ``` opened at *start*,
+    or ``None`` when it never balances before the text ends.
+
+    SELF-CONTAINED and ITERATIVE: it walks quote state and paren / backtick
+    nesting with a single loop and a ``depth`` counter, calling NOTHING in this
+    module and never recursing. Both are deliberate. It cannot delegate to the
+    boundary walker :func:`_matching_close_paren`, which is a CONSUMER of
+    :func:`_iter_shell_chars`, so reaching for it from inside that generator
+    recurses without bound. And it must not self-recurse per nesting level
+    either: ``is_denied`` is a gate that must return a DECISION and never raise,
+    so a stack that grows with attacker-chosen ``$(`` depth would turn a verdict
+    into ``RecursionError``. The sibling walkers (:func:`_matching_close_paren`,
+    :func:`_matching_close_backtick`, :func:`_substitution_bodies`) are all
+    iterative for the same reason; this matches them.
+
+    bash passes a nested substitution through verbatim when scanning for the
+    ``}`` of the enclosing expansion, so a ``}`` inside it must not read as that
+    expansion's closer; skipping the whole span here is what makes that true by
+    construction. A nested ``$(`` inside a ``$(...)`` simply raises the paren
+    depth (it contributes one ``(``); a backtick opens a sub-context in which
+    parens do not count and only an unescaped backtick closes.
+    """
+    n = len(text)
+    if text[start] == "`":
+        j = start + 1
+        while j < n:
+            c = text[j]
+            if c == "\\" and j + 1 < n:
+                j += 2
+                continue
+            if c == "`":
+                return j + 1
+            j += 1
+        return None
+    # ``$(`` subshell / command substitution. Count parens, quote-aware, with a
+    # single loop -- a nested ``$(`` is just another ``(`` that raises depth, so
+    # nesting costs a counter increment, not a Python stack frame.
+    j = start + 2
+    depth = 1
+    qstate = 0  # 0 unquoted, 1 single, 2 double
+    in_backtick = False  # inside a ``` `...` ``` sub-context, parens are inert
+    while j < n:
+        c = text[j]
+        if c == "\\" and qstate != 1 and j + 1 < n:
+            j += 2
+            continue
+        if in_backtick:
+            # Only an unescaped backtick closes the sub-context; nothing else
+            # (quotes, parens) counts while it is open.
+            if c == "`":
+                in_backtick = False
+            j += 1
+            continue
+        if qstate == 0 and c == "'":
+            qstate = 1
+        elif qstate == 1 and c == "'":
+            qstate = 0
+        elif qstate == 0 and c == '"':
+            qstate = 2
+        elif qstate == 2 and c == '"':
+            qstate = 0
+        elif qstate == 0 and c == "`":
+            in_backtick = True
+        elif qstate == 0 and c == "(":
+            # A bare ``(`` and a ``$(`` both add one open paren; the ``$`` before
+            # it is ordinary text for paren counting, so no special case.
+            depth += 1
+        elif qstate == 0 and c == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return None
+
+
+def _expansion_span(text: str, start: int) -> "int | None":
+    """Index of the ``}`` that closes the ``${`` opened at *start*, or ``None``
+    when the expansion never closes before the text ends.
+
+    SELF-CONTAINED, for the same reason as :func:`_skip_nested_substitution`.
+    Quote state runs THROUGH the span (POSIX 2.6.2: the matching ``}`` is found
+    by skipping quoted strings), so only an UNQUOTED, unescaped ``}`` closes it;
+    only ``${`` nests (a bare ``{`` is an ordinary character); and a nested
+    ``$(...)`` / backtick is skipped whole so a ``}`` inside one is inert.
+    """
+    n = len(text)
+    j = start + 2
+    depth = 1
+    qstate = 0
+    prev_dollar = False
+    while j < n:
+        c = text[j]
+        if c == "\\" and qstate != 1 and j + 1 < n:
+            prev_dollar = False
+            j += 2
+            continue
+        if qstate == 0 and c == "`":
+            inner = _skip_nested_substitution(text, j)
+            if inner is None:
+                return None
+            j = inner
+            prev_dollar = False
+            continue
+        if qstate == 0 and c == "$" and j + 1 < n and text[j + 1] == "(":
+            inner = _skip_nested_substitution(text, j)
+            if inner is None:
+                return None
+            j = inner
+            prev_dollar = False
+            continue
+        if qstate == 0 and c == "'":
+            qstate = 1
+        elif qstate == 1 and c == "'":
+            qstate = 0
+        elif qstate == 0 and c == '"':
+            qstate = 2
+        elif qstate == 2 and c == '"':
+            qstate = 0
+        elif qstate == 0 and c == "{" and prev_dollar:
+            depth += 1
+        elif qstate == 0 and c == "}":
+            depth -= 1
+            if depth == 0:
+                return j
+        prev_dollar = qstate == 0 and c == "$"
+        j += 1
+    return None
+
+
+def _yield_expansion(
+    text: str, start: int, close: int, state: int, ansi: bool
+) -> "Iterator[_ShellChar]":
+    """Yield the chars of a ``${...}`` span [*start*, *close*] that is KNOWN to
+    close at *close* (from :func:`_expansion_span`).
+
+    The ``${`` delimiters and the closing ``}`` are ``active`` (they ARE the
+    expansion boundary); every interior char is ``active=False`` so a ``)``
+    inside cannot close a ``$(...)`` span. Each interior char reports its own
+    single/double-quote state, so a consumer keying on ``step.state`` reads a
+    single-quoted ``'$('`` as quoted data, not a live substitution. A nested
+    ``$(...)`` / backtick is emitted inactive as a block.
+    """
+    yield _ShellChar(start, "$", "$", True, state, ansi, False)
+    yield _ShellChar(start + 1, "{", "{", True, state, ansi, False)
+    j = start + 2
+    qstate = 0
+    while j < close:
+        c = text[j]
+        if c == "\\" and qstate != 1 and j + 1 < close:
+            istate = 1 if qstate == 1 else 2 if qstate == 2 else state
+            yield _ShellChar(j, text[j : j + 2], text[j + 1], False, istate, ansi, False)
+            j += 2
+            continue
+        if qstate == 0 and c == "`":
+            inner = _skip_nested_substitution(text, j)
+            end = inner if inner is not None else close
+            for off in range(j, end):
+                yield _ShellChar(off, text[off], text[off], False, state, ansi, False)
+            j = end
+            continue
+        if qstate == 0 and c == "$" and j + 1 < close and text[j + 1] == "(":
+            inner = _skip_nested_substitution(text, j)
+            end = inner if inner is not None else close
+            for off in range(j, end):
+                yield _ShellChar(off, text[off], text[off], False, state, ansi, False)
+            j = end
+            continue
+        if qstate == 0 and c == "'":
+            qstate = 1
+        elif qstate == 1 and c == "'":
+            qstate = 0
+        elif qstate == 0 and c == '"':
+            qstate = 2
+        elif qstate == 2 and c == '"':
+            qstate = 0
+        istate = 1 if qstate == 1 else 2 if qstate == 2 else state
+        yield _ShellChar(j, c, c, False, istate, ansi, False)
+        j += 1
+    yield _ShellChar(close, "}", "}", True, state, ansi, False)
+
+
 def _iter_shell_chars(text: str, state: int = 0, ansi: bool = False) -> "Iterator[_ShellChar]":
     """THE shell quote/escape state machine. Every push-path reading of shell
     quoting walks through this one generator.
@@ -2092,9 +2274,20 @@ def _iter_shell_chars(text: str, state: int = 0, ansi: bool = False) -> "Iterato
     (``$(echo ${v:-)}; ...)`` extracted ``echo ${v:-`` while bash runs the
     rest): ``${...}`` parameter expansion, whose interior is data as far as
     paren counting goes, and ``#`` comments, which run to the newline. Both
-    yield their interior ``active=False``. Anything this misses (an exotic
-    nesting, a ``#`` after ``)``) errs toward scanning MORE, never less --
-    the fail-closed direction for every consumer.
+    yield their interior ``active=False``.
+
+    The ``${...}`` interior is read by three small self-contained scanners
+    rather than by re-counting parens and quotes inline: :func:`_expansion_span`
+    finds the closing ``}`` (quote-aware, nesting only on ``${``),
+    :func:`_skip_nested_substitution` skips a nested ``$(...)`` or ``` `...` ```
+    whole, and :func:`_yield_expansion` emits the span. Nesting is handled by
+    construction: a ``}`` inside a nested substitution is inert to this
+    expansion's brace depth, and a ``}`` inside a quote is literal (POSIX
+    2.6.2). These scanners stay independent of the boundary walker
+    :func:`_matching_close_paren`, which is a CONSUMER of this generator --
+    calling it from here recurses without bound. An expansion that never closes
+    is walked as ordinary chars (not suppressed), so an unclosed nested ``$(``
+    reaches the outer walk ``active`` and its ``(`` is counted -- scanning MORE.
 
     *state* and *ansi* resume a walk, which is what lets a quoted word spanning
     whitespace be read without desyncing.
@@ -2138,37 +2331,36 @@ def _iter_shell_chars(text: str, state: int = 0, ansi: bool = False) -> "Iterato
             elif ch == "$" and i + 1 < n and text[i + 1] == "{" and dollar_run % 2 == 0:
                 # ``${...}`` parameter expansion: this ``$`` is unpaired (an
                 # even run before it, so no ``$$`` PID pairing consumes it) and
-                # opens an expansion closed by the matching ``}``. The interior
-                # is data -- a ``)`` inside must not count as a substitution
-                # closer. Yield the delimiters as usual and the interior
-                # inactive; brace depth handles nesting, a backslash pair never
-                # closes, and an unclosed expansion simply runs out (malformed
-                # input bash would not execute; the walk keeps failing closed).
-                # Quote state is frozen across the span so an exotic interior
-                # cannot corrupt the rest of the walk.
-                yield _ShellChar(i, ch, ch, True, state, ansi, False)
-                yield _ShellChar(i + 1, "{", "{", True, state, ansi, False)
-                i += 2
-                dollar_run = 0
-                at_word_start = False
-                depth = 1
-                while i < n and depth > 0:
-                    c = text[i]
-                    if c == "\\" and i + 1 < n:
-                        yield _ShellChar(i, text[i : i + 2], text[i + 1], False, state, ansi, False)
-                        i += 2
-                        continue
-                    if c == "{":
-                        depth += 1
-                    elif c == "}":
-                        depth -= 1
-                        if depth == 0:
-                            yield _ShellChar(i, c, c, True, state, ansi, False)
-                            i += 1
-                            break
-                    yield _ShellChar(i, c, c, False, state, ansi, False)
-                    i += 1
-                continue
+                # opens an expansion closed by the matching ``}``. Its interior is
+                # data as far as paren counting goes -- a ``)`` inside must not
+                # count as a substitution closer.
+                #
+                # Whether this expansion CLOSES is decided up front by
+                # :func:`_expansion_span`, a self-contained scan that tracks quote
+                # state, brace nesting (only ``${`` nests, POSIX 2.6.2), and skips
+                # nested ``$(...)`` / ``` `...` ``` VERBATIM so a ``}`` inside one
+                # is not read as the closer. It must NOT be the boundary walker
+                # ``_matching_close_paren`` -- that is a CONSUMER of this
+                # generator, so calling it here recurses without bound.
+                #
+                # * CLOSES -> yield ``${`` and the interior ``active=False`` (a
+                #   ``)`` inside cannot close a ``$(...)`` span) with each char's
+                #   own quote state, then the closing ``}`` active. Nested
+                #   substitutions are yielded inactive as a block.
+                # * NEVER CLOSES (malformed input bash would not run) -> do NOT
+                #   suppress: fall through so ``${`` and its interior walk as
+                #   ordinary chars. An unclosed nested ``$(`` then reaches the
+                #   outer walk ACTIVE, so ``paren_delta`` counts it and
+                #   ``_protected_name_in_substitution`` does not break a token
+                #   early -- the scan-MORE (fail-closed) direction.
+                close = _expansion_span(text, i)
+                if close is not None:
+                    yield from _yield_expansion(text, i, close, state, ansi)
+                    i = close + 1
+                    dollar_run = 0
+                    at_word_start = False
+                    continue
+                # else: fall through to the ordinary yield below.
             elif ch == "#" and at_word_start:
                 # Comment to end of line: the ``#`` itself reads as usual, the
                 # interior is inert so a ``)`` inside cannot close a span, and
