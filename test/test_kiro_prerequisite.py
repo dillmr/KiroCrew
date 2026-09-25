@@ -155,6 +155,79 @@ async def _wait_for_operation(service: KiroPrerequisiteService) -> None:
     await asyncio.wait_for(task, timeout=5)
 
 
+class TestHostSandboxReadiness:
+    def test_probe_failure_payload_does_not_claim_host_sandbox(self) -> None:
+        from kiro_crew.dashboard.handlers.kiro_prerequisite import _not_ready_snapshot
+
+        assert _not_ready_snapshot()["sandbox_backend_available"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("floor,blocked", [(None, True), ("standard", False)])
+    async def test_effective_off_tier_blocks_only_enforced_backends(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, floor, blocked: bool
+    ) -> None:
+        from kiro_crew import sandbox
+
+        monkeypatch.setattr(sandbox, "configured_sandbox_mode", lambda: "off")
+        monkeypatch.setattr(sandbox, "_governance_sandbox_floor", lambda: floor)
+        monkeypatch.setattr(sandbox, "_inside_kirocrew_sandbox", lambda: False)
+        monkeypatch.setattr(sandbox, "detect_backend", lambda **kwargs: "namespace")
+        monkeypatch.setattr(
+            prerequisite_module, "find_kiro_cli_candidates", lambda *args, **kwargs: []
+        )
+        service = KiroPrerequisiteService(home=tmp_path, environ={}, audit_writer=_no_audit)
+        status = await service.snapshot(force=True)
+        assert status["sandbox_backend_available"] is True
+        assert ("codex" in status["sandbox_blocked_backends"]) is blocked
+        assert "claude" not in status["sandbox_blocked_backends"]
+        assert "kas" not in status["sandbox_blocked_backends"]
+        assert "kiro-cli" not in status["sandbox_blocked_backends"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "platform_name,backend,available",
+        [
+            ("win32", "none", False),
+            ("darwin", "sandbox-exec", True),
+            ("linux", "namespace", True),
+            ("linux", "none", False),
+        ],
+    )
+    async def test_no_kiro_candidate_still_reports_host_sandbox(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        platform_name: str,
+        backend: str,
+        available: bool,
+    ) -> None:
+        from kiro_crew import sandbox
+
+        loop_thread = threading.get_ident()
+
+        def detect(**kwargs) -> str:
+            assert threading.get_ident() != loop_thread
+            return backend
+
+        monkeypatch.setattr(sandbox, "detect_backend", detect)
+        monkeypatch.setattr(
+            prerequisite_module, "find_kiro_cli_candidates", lambda *args, **kwargs: []
+        )
+        service = KiroPrerequisiteService(
+            platform_name=platform_name,
+            environ={"HOME": str(tmp_path), "PATH": ""},
+            home=tmp_path,
+            audit_writer=_no_audit,
+        )
+        status = await service.snapshot(force=True)
+        assert status["installed"] is False
+        assert status["sandbox_unavailable"] is False
+        assert status["sandbox_backend_available"] is available
+        # The no-op repair response is cached by the browser as the same payload.
+        repaired = await service.repair_agent_specs()
+        assert repaired["sandbox_backend_available"] is available
+
+
 class TestKiroPrerequisiteHelpers:
     def test_identity_file_lockdown_precedes_content(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -989,7 +1062,16 @@ class TestKiroPrerequisiteWorkflow:
         assert json.loads(blocked.body)["code"] == "kiro_prerequisite_required"
 
     @pytest.mark.asyncio
-    async def test_explicit_test_harness_mode_assumes_ready(self, tmp_path: Path) -> None:
+    async def test_explicit_test_harness_mode_assumes_ready(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from kiro_crew import sandbox
+
+        def no_host_probe():
+            raise AssertionError("test harness readiness must not probe sandbox facts")
+
+        monkeypatch.setattr(sandbox, "detect_backend", no_host_probe)
+
         async def should_not_run(
             command: str,
             args: list[str],
@@ -1013,6 +1095,8 @@ class TestKiroPrerequisiteWorkflow:
         assert status["authenticated"] is True
         assert status["ready"] is True
         assert status["initial_setup_complete"] is True
+        assert status["sandbox_backend_available"] is True
+        assert status["sandbox_blocked_backends"] == []
 
     @pytest.mark.asyncio
     async def test_user_owned_path_candidate_probes_version_then_whoami(
@@ -7144,3 +7228,71 @@ class TestTerminalAuditErrorLabels:
         update_labels = [item for item in self._terminal_labels(events) if item[0] == "update_cli"]
         assert update_labels == [("update_cli", "failed", "nonzero exit")]
         self._assert_outcome_and_error_agree(events)
+
+
+@pytest.mark.asyncio
+class TestKasRecordsFirstRunSetup:
+    """KAS (kiro-cli's relay) records first-run completion on the acp_supported
+    rule, in lock-step with the onboarding gate's client admission.
+
+    Before the fix ``record_independent_backend_setup`` refused KAS outright (it
+    is deliberately absent from ``ACP_BACKENDS_INDEPENDENT_SETUP``), so a KAS
+    first run never wrote the durable marker and ``initial_setup_complete``
+    stayed false forever — the gate force-probed kiro-cli and a non-owner was
+    pinned on the owner-setup screen. The client admits KAS when
+    ``acp_supported`` holds; this test pins the server marker to the SAME rule.
+    """
+
+    def _service(self, tmp_path: Path, monkeypatch, *, acp_supported: bool):
+        from kiro_crew import acp_backends, sandbox
+        from kiro_crew.agent_sdk import backend_install
+
+        service = KiroPrerequisiteService(
+            platform_name="linux",
+            environ={"HOME": str(tmp_path), "PATH": ""},
+            home=tmp_path,
+            data_home=tmp_path / "data-home",
+            audit_writer=lambda *_a, **_k: None,
+        )
+        service._status = replace(service._status, acp_supported=acp_supported)
+        monkeypatch.setattr(sandbox, "detect_backend", lambda: "bwrap")
+        monkeypatch.setattr(sandbox, "configured_sandbox_mode", lambda: "standard")
+        monkeypatch.setattr(sandbox, "credential_mask_applies", lambda _mode: True)
+        monkeypatch.setattr(acp_backends, "selectable_backend_values", lambda: {"kas"})
+        monkeypatch.setattr(
+            backend_install,
+            "probe_backend",
+            lambda backend: backend_install.BackendInstallState(
+                backend, backend, backend_install.INSTALLED
+            ),
+        )
+        return service
+
+    async def test_kas_records_setup_when_kiro_cli_speaks_acp(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        service = self._service(tmp_path, monkeypatch, acp_supported=True)
+        assert service.initial_setup_complete is False
+        assert await service.record_independent_backend_setup("kas") is True
+        assert service.initial_setup_complete is True
+
+    async def test_kas_refused_when_kiro_cli_too_old_for_acp(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # acp_supported False is the ONE thing that blocks KAS here, matching the
+        # client's `status.acp_supported !== false` refusal.
+        service = self._service(tmp_path, monkeypatch, acp_supported=False)
+        assert await service.record_independent_backend_setup("kas") is False
+        assert service.initial_setup_complete is False
+
+    async def test_kas_refused_when_not_selectable(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from kiro_crew import acp_backends
+
+        service = self._service(tmp_path, monkeypatch, acp_supported=True)
+        # KAS is only selectable in Developer Mode; when it is not offered, the
+        # marker is refused just as the client gates on `probe.selectable`.
+        monkeypatch.setattr(acp_backends, "selectable_backend_values", lambda: set())
+        assert await service.record_independent_backend_setup("kas") is False
+        assert service.initial_setup_complete is False

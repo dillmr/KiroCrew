@@ -31,6 +31,15 @@ export interface AcpBackendProbe {
   id: string
   policy_id: string
   selectable: boolean
+  /** Explicit gateway capability: this harness can complete setup without Kiro CLI. */
+  independent_setup: boolean
+  /**
+   * This harness is kiro-cli's relay (KAS): it completes first-run setup on the
+   * kiro-cli ACP-support rule (`acp_supported`), NOT the `independent_setup`
+   * bypass and NOT a kiro-cli login. Server-declared so the onboarding gate and
+   * the marker write (`record_independent_backend_setup`) share one rule.
+   */
+  kiro_cli_relay: boolean
   installed: AcpBackendInstalled
   missing_components: string[]
   install_command: string

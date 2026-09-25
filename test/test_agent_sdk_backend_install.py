@@ -871,6 +871,8 @@ class TestEndpointPayloadShape:
                 "id",
                 "policy_id",
                 "selectable",
+                "independent_setup",
+                "kiro_cli_relay",
                 "installed",
                 "missing_components",
                 "install_command",
@@ -915,6 +917,8 @@ class TestEndpointPayloadShape:
             "id": "",
             "policy_id": "kiro",
             "selectable": True,
+            "independent_setup": False,
+            "kiro_cli_relay": False,
             "installed": "installed",
             "missing_components": [],
             "install_command": "",
@@ -937,6 +941,12 @@ class TestEndpointPayloadShape:
         # Not selectable in this build AND not installed here -- both facts on
         # one row, which is the whole reason the endpoint exists.
         assert by_policy["claude"]["selectable"] is False
+        assert by_policy["claude"]["independent_setup"] is True
+        assert by_policy["kas"]["independent_setup"] is False
+        # KAS is the only kiro-cli relay: the onboarding gate reads this flag
+        # (not the id) to admit it on the acp_supported rule.
+        assert by_policy["kas"]["kiro_cli_relay"] is True
+        assert by_policy["claude"]["kiro_cli_relay"] is False
         assert by_policy["claude"]["installed"] == "missing"
         assert by_policy["claude"]["missing_components"] == [
             probe.COMPONENT_CLAUDE_ACP_ADAPTER,
