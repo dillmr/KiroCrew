@@ -11,7 +11,7 @@
 // shape itself is pinned server-side in `test/test_work_ledger_board.py`, and the
 // committed screenshot fixtures are real handler output.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, cleanup, waitFor } from '@testing-library/react'
+import { render, screen, cleanup, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Provider } from 'react-redux'
@@ -32,6 +32,9 @@ vi.mock('../api/client', () => ({
 }))
 
 const CONDUCTOR = 'chat-1-conductor'
+const PAUSE_WARNING = 'Work is paused for now, but the pause could not be saved and may be lost after a restart. Retry saving the pause.'
+const RETRY_HINT = /Retry saving pause: Stop current turn\./
+const CACHED_TITLE = "Couldn't refresh — showing the last loaded version"
 
 function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
   return {
@@ -86,7 +89,7 @@ async function mount(payload: WorkBoardResponse | Error, conductor = CONDUCTOR) 
   )
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const { CrewBoard } = await import('../pages/CrewBoardPage')
-  return render(
+  const view = render(
     <Provider store={store}>
       <QueryClientProvider client={qc}>
         <MemoryRouter>
@@ -95,6 +98,7 @@ async function mount(payload: WorkBoardResponse | Error, conductor = CONDUCTOR) 
       </QueryClientProvider>
     </Provider>,
   )
+  return { ...view, queryClient: qc }
 }
 
 describe('CrewBoardPage', () => {
@@ -242,9 +246,180 @@ describe('CrewBoardPage', () => {
     expect(await screen.findByText(/could not confirm/i)).toBeTruthy()
   })
 
+  it('shows an unsaved-pause warning after an acknowledged Crew board Stop', async () => {
+    const orphan = item({ item_id: 'it_unsaved', title: 'pause me', orphaned: true })
+    await mount(board({ conductor_alive: 'closed', items: [orphan] }))
+    expect(await screen.findByText('pause me')).toBeTruthy()
+
+    crewBoardAction.mockResolvedValueOnce({
+      ok: true, action: 'stop', item_id: orphan.item_id,
+      goal_pause_saved: false, warning: PAUSE_WARNING,
+    })
+    crewBoard.mockResolvedValue(board({
+      conductor_alive: 'closed', items: [{ ...orphan, alive: 'idle' }],
+    }))
+    await userEvent.click(screen.getByRole('button', { name: 'Stop current turn' }))
+    await waitFor(() => expect(crewBoard).toHaveBeenCalledTimes(2))
+
+    expect(await screen.findByText(PAUSE_WARNING)).toBeTruthy()
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+    expect(screen.queryByText(/could not confirm/i)).toBeNull()
+    expect(screen.getByText(/session stays open/i)).toBeTruthy()
+    expect(screen.getByText(RETRY_HINT).textContent).toContain(
+      'This cancels the turn running now, and the session stays open.',
+    )
+    expect(crewBoardAction).toHaveBeenCalledTimes(1)
+    expect(crewBoardAction).toHaveBeenCalledWith(CONDUCTOR, orphan.item_id, 'stop')
+
+    // Only a separate click and its ordinary acknowledgment clear the warning.
+    await userEvent.click(screen.getByRole('button', { name: 'Stop current turn' }))
+    await waitFor(() => expect(crewBoardAction).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.queryByText(PAUSE_WARNING)).toBeNull())
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByText(RETRY_HINT)).toBeNull()
+  })
+
+  it('keeps both Stop refusal and unsaved-pause facts in one notice', async () => {
+    const orphan = item({ item_id: 'it_refused_unsaved', title: 'still running', orphaned: true })
+    await mount(board({ conductor_alive: 'closed', items: [orphan] }))
+    expect(await screen.findByText('still running')).toBeTruthy()
+
+    crewBoardAction.mockResolvedValueOnce({
+      ok: false, action: 'stop', item_id: orphan.item_id,
+      goal_pause_saved: false, warning: PAUSE_WARNING,
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Stop current turn' }))
+    await waitFor(() => expect(crewBoard).toHaveBeenCalledTimes(2))
+
+    expect(await screen.findByText(PAUSE_WARNING)).toBeTruthy()
+    expect(screen.getByText(/could not confirm/i)).toBeTruthy()
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+    expect(crewBoardAction).toHaveBeenCalledTimes(1)
+    expect(crewBoardAction).toHaveBeenCalledWith(CONDUCTOR, orphan.item_id, 'stop')
+  })
+
+  it.each(['request error', 'Stop refusal'])(
+    'retains an unsaved pause when a later explicit retry returns %s',
+    async (outcome) => {
+      const orphan = item({ item_id: 'it_retry', title: 'retry the pause', orphaned: true })
+      await mount(board({ conductor_alive: 'closed', items: [orphan] }))
+      expect(await screen.findByText(orphan.title)).toBeTruthy()
+      crewBoardAction.mockResolvedValueOnce({
+        ok: true, action: 'stop', item_id: orphan.item_id,
+        goal_pause_saved: false, warning: PAUSE_WARNING,
+      })
+      await userEvent.click(screen.getByRole('button', { name: 'Stop current turn' }))
+      expect(await screen.findByText(PAUSE_WARNING)).toBeTruthy()
+      await waitFor(() => expect(crewBoard).toHaveBeenCalledTimes(2))
+
+      if (outcome === 'request error') {
+        crewBoardAction.mockRejectedValueOnce(
+          Object.assign(new Error('the board cache is flagged dirty'), { status: 500 }),
+        )
+      } else {
+        crewBoardAction.mockResolvedValueOnce({
+          ok: false, action: 'stop', item_id: orphan.item_id,
+        })
+      }
+      await userEvent.click(screen.getByRole('button', { name: 'Stop current turn' }))
+      expect(await screen.findByText(
+        outcome === 'request error' ? /did not go through/i : /could not confirm/i,
+      )).toBeTruthy()
+      expect(screen.getByText(PAUSE_WARNING)).toBeTruthy()
+      expect(screen.getByText(RETRY_HINT)).toBeTruthy()
+      if (outcome === 'request error') {
+        // Keep the backend sentence intact for ErrorNotice's journal lookup.
+        expect(screen.getByText('the board cache is flagged dirty')).toBeTruthy()
+      }
+      expect(crewBoardAction.mock.calls).toEqual([
+        [CONDUCTOR, orphan.item_id, 'stop'],
+        [CONDUCTOR, orphan.item_id, 'stop'],
+      ])
+
+      // A later acknowledged, saved Stop still clears both facts.
+      await userEvent.click(screen.getByRole('button', { name: 'Stop current turn' }))
+      await waitFor(() => expect(screen.queryByText(PAUSE_WARNING)).toBeNull())
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(screen.queryByText(RETRY_HINT)).toBeNull()
+      expect(crewBoardAction).toHaveBeenCalledTimes(3)
+    },
+  )
+
+  it.each([
+    { status: 503, detail: 'board refresh unavailable' },
+    { status: 404, detail: 'no work ledger for this conductor' },
+  ])('retains the loaded row and unsaved pause through a failed refresh and recovery ($status)', async ({ status, detail }) => {
+    const orphan = item({ item_id: 'it_refresh', title: 'keep this row', orphaned: true })
+    const { queryClient } = await mount(board({ conductor_alive: 'closed', items: [orphan] }))
+    expect(await screen.findByText(orphan.title)).toBeTruthy()
+    crewBoardAction.mockResolvedValueOnce({
+      ok: true, action: 'stop', item_id: orphan.item_id,
+      goal_pause_saved: false, warning: PAUSE_WARNING,
+    })
+    const stop = screen.getByRole('button', { name: 'Stop current turn' })
+    await userEvent.click(stop)
+    expect(await screen.findByText(PAUSE_WARNING)).toBeTruthy()
+    await waitFor(() => expect(crewBoard).toHaveBeenCalledTimes(2))
+
+    crewBoard.mockRejectedValueOnce(
+      Object.assign(new Error(detail), { status }),
+    )
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: crewBoardQueryKey(CONDUCTOR) })
+    })
+    expect(await screen.findByText(detail)).toBeTruthy()
+    expect(screen.getByText(CACHED_TITLE)).toBeTruthy()
+    expect(screen.getByText(orphan.title)).toBeTruthy()
+    expect(screen.getByText(PAUSE_WARNING)).toBeTruthy()
+    expect(screen.getByText(RETRY_HINT)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Stop current turn' })).toBe(stop)
+
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: crewBoardQueryKey(CONDUCTOR) })
+    })
+    await waitFor(() => expect(screen.queryByText(detail)).toBeNull())
+    expect(screen.queryByText(CACHED_TITLE)).toBeNull()
+    expect(screen.getByText(PAUSE_WARNING)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Stop current turn' })).toBe(stop)
+    expect(crewBoard).toHaveBeenCalledTimes(4)
+    expect(crewBoardAction.mock.calls).toEqual([[CONDUCTOR, orphan.item_id, 'stop']])
+  })
+
+  it.each([
+    { status: 503, detail: 'empty board refresh unavailable' },
+    { status: 404, detail: 'no work ledger for this conductor' },
+  ])('labels the last loaded empty board when a refresh fails ($status)', async ({ status, detail }) => {
+    const { queryClient } = await mount(board({ items: [] }))
+    expect(await screen.findByText('No work items yet')).toBeTruthy()
+
+    crewBoard.mockRejectedValueOnce(Object.assign(new Error(detail), { status }))
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: crewBoardQueryKey(CONDUCTOR) })
+    })
+    expect(await screen.findByText(detail)).toBeTruthy()
+    expect(screen.getByText(CACHED_TITLE)).toBeTruthy()
+    expect(screen.getByText('No work items yet')).toBeTruthy()
+    expect(screen.getByText('ship the ledger')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Stop current turn' })).toBeNull()
+    expect(crewBoardAction).not.toHaveBeenCalled()
+    expect(crewBoard).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows an initial read failure without inventing loaded rows', async () => {
+    await mount(Object.assign(new Error('initial board read unavailable'), { status: 503 }))
+    expect(await screen.findByText('initial board read unavailable')).toBeTruthy()
+    expect(screen.getByText('Could not read this board')).toBeTruthy()
+    expect(screen.queryByText(CACHED_TITLE)).toBeNull()
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: 'Stop current turn' })).toBeNull()
+  })
+
   it('renders a session with no work ledger as a gap, not a failure', async () => {
     await mount(Object.assign(new Error('no ledger'), { status: 404 }))
     expect(await screen.findByText(/has no crew board/i)).toBeTruthy()
+    expect(screen.queryByText(CACHED_TITLE)).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(crewBoardAction).not.toHaveBeenCalled()
   })
 
   it('asks for a conductor when none is selected', async () => {
