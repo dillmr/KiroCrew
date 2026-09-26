@@ -54,6 +54,14 @@ _EMPHASIS_RUN = re.compile(r"(?:[*_~`]|\|\|)+")
 # safe, since the fallback is to scan the text as written.
 _MD_LINK = re.compile(r"\[([^\[\]\n]*)\]\(([^()\n]*)\)")
 _SLACK_LINK = re.compile(r"<([^<>|\n]*)\|([^<>\n]*)>")
+# A line-leading heading / subtext marker the client removes at render: an ATX
+# heading (``#``..``######`` + space) or Discord subtext (``-#`` + space), at the
+# start of the string or a line. The marker vanishes on screen, so a credential
+# whose halves sit either side of it -- ``...AKIA`` ending one message, ``# REST``
+# opening the next -- reads whole to the reader while every literal scan sees the
+# ``# `` between them. Anchored to a line start so a ``#`` mid-line (a fragment,
+# a comment) is left untouched.
+_HEADING_MARKER = re.compile(r"(?m)^(?:#{1,6}|-#)[ \t]+")
 
 #: How many consecutive messages one INTERIOR reading may span in
 #: :func:`severs_a_credential`. A credential framed by a spoiling message on each
@@ -107,6 +115,9 @@ def canonicalize_display(text: str) -> str:
       the joined key, with the url nowhere in sight;
     * **emphasis / code / spoiler delimiters** vanish -- ``AKIA**REST**`` and
       Discord's ``AKIA||REST||`` likewise;
+    * **line-leading heading / subtext markers** (``# ``..``###### ``, Discord's
+      ``-# ``) are removed at render, so a key split as ``...AKIA`` ending one
+      message and ``# REST`` opening the next is whole on screen;
     * **invisible format characters** were never rendered at all -- see
       :func:`_strip_format_chars`.
 
@@ -118,6 +129,7 @@ def canonicalize_display(text: str) -> str:
     out = _MD_LINK.sub(r"\1", text)
     out = _SLACK_LINK.sub(r"\2", out)
     out = _EMPHASIS_RUN.sub("", out)
+    out = _HEADING_MARKER.sub("", out)
     return _strip_format_chars(out)
 
 
