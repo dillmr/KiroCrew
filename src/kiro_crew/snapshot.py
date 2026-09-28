@@ -103,6 +103,7 @@ from kiro_crew.snapshot_components import (  # noqa: F401 - facade re-exports
     _WHOLE_TREE_COMPONENTS,
     COMPONENT_HELP,
     COMPONENT_JSON_OBJECTS,
+    COMPONENT_JSON_VALIDATORS,
     COMPONENT_TREES,
     COMPONENTS,
     CORE_FILES,
@@ -120,6 +121,7 @@ from kiro_crew.snapshot_components import (  # noqa: F401 - facade re-exports
     _is_host_local,
     _mc_dir,
     _never_ships,
+    _slack_workspace_record_defect,
     _tree_roots_replace_clears,
     _want,
     is_product_tree_database,
@@ -155,6 +157,7 @@ from kiro_crew.snapshot_restore import (  # noqa: F401 - facade re-exports
     _allocate_rollback_dir,
     _backup_and_copy,
     _backup_tree_or_refuse,
+    _bundle_record_names_workspace,
     _clear_store_directories,
     _component_payload_absent,
     _components_absent_from_bundle,
@@ -163,7 +166,9 @@ from kiro_crew.snapshot_restore import (  # noqa: F401 - facade re-exports
     _drop_derived_indexes_absent_from_bundle,
     _install_locked_document,
     _lock_down_restored,
+    _record_without_its_map,
     _refuse_corrupt_source_databases,
+    _refuse_legacy_slack_links_without_record,
     _refuse_unless_json_object,
     _refuse_unless_sound,
     _refuse_unless_valid_tree_document,
@@ -1389,8 +1394,27 @@ def _do_merge(
             print("  ⚠️  crons: merge skipped (see warning above) — no jobs imported")
 
     if _want(components, "config"):
+        # The Slack workspace record installs ONLY together with the session map
+        # it describes. Merge copies each core file where the destination lacks
+        # it, so a home that has a live map and no record (every install that
+        # predates the record, until its first recording boot) would otherwise
+        # take the bundle's record alone -- a workspace identity for links that
+        # were never written under it -- and the next connected handshake would
+        # read that identity as the former one, see a switch, and sweep every
+        # live Slack link, with the marker's undo copy gone once the switch
+        # adopts. The converse (map without record) is refused before mutation
+        # by ``_refuse_legacy_slack_links_without_record``; this is the other
+        # half. The live map keeps its own state: no record, first-record
+        # branch on the next handshake, links kept.
+        map_installs = (snap / "session_map.json").is_file() and not (
+            mc / "session_map.json"
+        ).is_file()
         for f in CORE_FILES["config"]:
             s, d = snap / f, mc / f
+            if f == "slack_workspace.json" and not map_installs:
+                if s.is_file() and not d.is_file():
+                    print(f"  {f}: skipped (its session map is not being restored)")
+                continue
             if s.is_file() and not d.is_file():
                 shutil.copy2(str(s), str(d))
                 print(f"  {f}: restored (was missing)")
@@ -1866,6 +1890,7 @@ def restore_main(argv: list[str] | None = None, *, parsed: argparse.Namespace | 
                 snap,
                 components,
                 mc_for_merge=None if mode == "replace" else mc,
+                live_home=mc,
             )
         except SourceComponentUnsound as e:
             _audit(
