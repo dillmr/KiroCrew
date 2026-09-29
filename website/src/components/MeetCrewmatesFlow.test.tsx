@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { screen, fireEvent, waitFor } from '@testing-library/react'
+import { useLocation } from 'react-router-dom'
 import { renderWithProviders } from '../test/helpers'
 import MeetCrewmatesFlow, { builtFromOptions, isValidCrewmateName, scheduleFor } from './MeetCrewmatesFlow'
 import { hasNoCrewmates } from '../hooks/useMeetCrewmatesGate'
+import { seededTraits } from './CrewAvatar'
 import { api } from '../api/client'
 
 // framer-motion never finishes an exit animation in jsdom, so the step
@@ -162,6 +164,7 @@ describe('MeetCrewmatesFlow', () => {
       kiro_agent: 'kirocrew',
       description: 'Triage new GitHub issues every morning',
       source: 'kirocrew',
+      avatar: { kind: 'ghost', traits: seededTraits('Radar') },
     })
     await waitFor(() => expect(createCron).toHaveBeenCalledTimes(1))
     const cronBody = createCron.mock.calls[0][0] as Record<string, unknown>
@@ -358,43 +361,71 @@ describe('MeetCrewmatesFlow', () => {
     expect(screen.queryByTestId('meet-crewmates-schedule-error')).toBeNull()
   })
 
-  it('a name the roster could never list (a space) disables Next and says so under the field; nothing is posted', () => {
+  it.each(['Issue Radar', '雷达', '-radar'])('a free-form name (%s) is accepted and sent as typed', async name => {
     renderWithProviders(<MeetCrewmatesFlow open onDone={vi.fn()} onCreated={vi.fn()} />)
     next()
-    fireEvent.change(screen.getByTestId('meet-crewmates-name'), { target: { value: 'Issue Radar' } })
-    expect(screen.getByTestId('meet-crewmates-next')).toBeDisabled()
-    // A validation hint, not an error notice: nothing failed.
-    expect(screen.getByTestId('meet-crewmates-name-hint')).toHaveTextContent('letters, numbers, - and _')
-    expect(screen.queryByTestId('meet-crewmates-name-error')).toBeNull()
-    expect(screen.queryByRole('alert')).toBeNull()
-    expect(screen.getByTestId('meet-crewmates-name')).toHaveAttribute('aria-invalid', 'true')
-    fireEvent.change(screen.getByTestId('meet-crewmates-name'), { target: { value: 'Issue-Radar' } })
+    fireEvent.change(screen.getByTestId('meet-crewmates-name'), { target: { value: name } })
     expect(screen.getByTestId('meet-crewmates-next')).toBeEnabled()
+    expect(screen.getByTestId('meet-crewmates-name')).not.toHaveAttribute('aria-invalid')
     expect(screen.queryByTestId('meet-crewmates-name-hint')).toBeNull()
-    expect(createAgent).not.toHaveBeenCalled()
+    next()
+    fireEvent.click(screen.getByTestId('meet-crewmates-create'))
+    await screen.findByTestId('meet-crewmates-ready')
+    expect(createAgent).toHaveBeenCalledWith(expect.objectContaining({ name }))
   })
 
-  it('a server 400 invalid_agent_name lands under the name field on step 2', async () => {
+  it('open chat addresses the crewmate by the key the server derived, not the typed label', async () => {
+    createAgent.mockResolvedValueOnce({ ok: true, name: 'issue-radar', memory_store: 'm1', member_id: 'ir-id' })
+    function Where() {
+      const loc = useLocation()
+      return <div data-testid="where">{loc.pathname + loc.search}</div>
+    }
+    renderWithProviders(
+      <>
+        <MeetCrewmatesFlow open onDone={vi.fn()} onCreated={vi.fn()} />
+        <Where />
+      </>,
+    )
+    next()
+    fireEvent.change(screen.getByTestId('meet-crewmates-name'), { target: { value: 'Issue Radar' } })
+    next()
+    fireEvent.click(screen.getByTestId('meet-crewmates-create'))
+    // The label stays what the user typed.
+    expect(await screen.findByTestId('meet-crewmates-ready')).toHaveTextContent('Issue Radar is ready')
+    fireEvent.click(screen.getByTestId('meet-crewmates-open-chat'))
+    expect(screen.getByTestId('where')).toHaveTextContent('/members?member=issue-radar')
+    // The face step 2 previewed (drawn from the typed name) is pinned, so the
+    // roster, which draws an unpinned crew from its key, shows the same face.
+    expect(createAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ avatar: { kind: 'ghost', traits: seededTraits('Issue Radar') } }),
+    )
+  })
+
+  it('a blank name disables Next', () => {
+    renderWithProviders(<MeetCrewmatesFlow open onDone={vi.fn()} onCreated={vi.fn()} />)
+    next()
+    fireEvent.change(screen.getByTestId('meet-crewmates-name'), { target: { value: '   ' } })
+    expect(screen.getByTestId('meet-crewmates-next')).toBeDisabled()
+  })
+
+  it.each(['invalid_member_name', 'credential_shaped_name'])('a server 400 %s lands under the name field on step 2', async code => {
     const { ApiError } = await import('../api/apiError')
-    createAgent.mockRejectedValueOnce(new ApiError(400, 'bad', JSON.stringify({ code: 'invalid_agent_name' })))
+    createAgent.mockRejectedValueOnce(new ApiError(400, 'bad', JSON.stringify({ code })))
     renderWithProviders(<MeetCrewmatesFlow open onDone={vi.fn()} onCreated={vi.fn()} />)
     next()
     next()
     fireEvent.click(screen.getByTestId('meet-crewmates-create'))
-    expect(await screen.findByTestId('meet-crewmates-name-error')).toHaveTextContent('letters, numbers, - and _')
+    expect(await screen.findByTestId('meet-crewmates-name-error')).toHaveTextContent("This name can't be used")
     expect(screen.getByTestId('meet-crewmates-step-2')).toBeInTheDocument()
     expect(createCron).not.toHaveBeenCalled()
   })
 
-  it('isValidCrewmateName mirrors the backend agent-name grammar', () => {
+  it('isValidCrewmateName only refuses a blank name', () => {
     expect(isValidCrewmateName('Radar')).toBe(true)
-    expect(isValidCrewmateName('issue-radar_2')).toBe(true)
-    expect(isValidCrewmateName('R')).toBe(true)
-    expect(isValidCrewmateName('Issue Radar')).toBe(false)
-    expect(isValidCrewmateName('-radar')).toBe(false)
-    expect(isValidCrewmateName('radar-')).toBe(false)
+    expect(isValidCrewmateName('Issue Radar')).toBe(true)
+    expect(isValidCrewmateName('雷达')).toBe(true)
     expect(isValidCrewmateName('')).toBe(false)
-    expect(isValidCrewmateName('雷达')).toBe(false)
+    expect(isValidCrewmateName('  ')).toBe(false)
   })
 
   it('a schedule failure notice offers a way to the Schedule page and leaving completes the flow', async () => {

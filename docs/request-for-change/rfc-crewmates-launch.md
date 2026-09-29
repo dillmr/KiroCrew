@@ -279,6 +279,11 @@ only delivery choice the flow offers is "Its own chat" (`hide_in_chat`). Step 2
 calls the base agent "Starting setup" ("Standard (built in)" for the default),
 and the crewmate name is held to the roster's agent-name grammar before Next.
 
+Amended 2026-09-29 (PR #15085): the crewmate name is free-form. Step 2
+only refuses a blank name; the server's `validate_member_name` is the gate,
+and a name it refuses returns the user to step 2 with the reason under the
+field.
+
 Amended 2026-09-28 by the product owner (PR #14914): when the flow shows.
 Having seen it -- finished or dismissed, recorded as
 `dashboard.crewmates_onboarded` -- is the ONLY condition on showing it.
