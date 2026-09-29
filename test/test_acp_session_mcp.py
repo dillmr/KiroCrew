@@ -801,37 +801,332 @@ class TestClientSeam:
         assert "foo" in _by_name(client._session_mcp_servers())
         assert len(calls) == 2
 
-    def test_no_tools_reach_a_session_whose_permissions_crew_does_not_own(
-        self, tmp_path, agents_dir
-    ):
-        """Tools are delivered only where Crew can still withhold their use.
-
-        Crew's gate fires on ``session/request_permission``. A tool pre-approved in
-        ``permissions.allow`` never sends one, so Crew sees the ``tool_call``
-        notification after the fact and cannot stop it. The seed Crew authors is
-        what puts a session under the gate -- and the writer is create-or-decline,
-        so a project carrying its OWN settings.local.json gets no seed and Crew
-        governs nothing there. Handing that session the array would deliver
-        spawn_run, cron_add, send_message and every configured server into a
-        permission surface Crew does not control.
-        """
-        _write_spec(agents_dir, servers={"foo": {"command": "/bin/foo"}}, tools=["@foo"])
+    @staticmethod
+    def _project_owned_settings(tmp_path, payload):
+        """A project's OWN ``.claude/settings.local.json``, written before Crew runs."""
         path = tmp_path / ".claude" / "settings.local.json"
         path.parent.mkdir(parents=True)
-        path.write_text(
-            json.dumps({"permissions": {"allow": ["mcp__foo__write"]}}), encoding="utf-8"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    @staticmethod
+    async def _session_new_params(client, tmp_path, monkeypatch):
+        """Drive the real ``session/new`` call site and return the params it sent."""
+        sent: list[dict] = []
+
+        async def _work_dir():
+            return str(tmp_path)
+
+        async def _send(_method, params):
+            sent.append(params)
+            return 1
+
+        async def _wait(_rid, **_kw):
+            return {"sessionId": "s-1"}
+
+        monkeypatch.setattr(client, "_session_work_dir", _work_dir)
+        monkeypatch.setattr(client, "_send_request", _send)
+        monkeypatch.setattr(client, "_wait_for_response", _wait)
+        await client._new_session_following_substitution()
+        assert len(sent) == 1
+        return sent[0]
+
+    @pytest.mark.asyncio
+    async def test_a_project_owned_settings_file_still_gets_crews_tools(
+        self, tmp_path, agents_dir, monkeypatch
+    ):
+        """A project that owns settings.local.json keeps Crew's tools, gated.
+
+        The file is left exactly as it is, and out of the session: the envelope
+        loads only the ``user`` setting source, so neither the project's
+        ``settings.local.json`` nor its checked-in ``.claude/settings.json`` reaches
+        the CLI. No ``permissions.allow`` a repository carries can pre-approve a
+        call before Crew's gate sees it. Crew's own settings ride inline instead.
+        That is what makes it safe to deliver the whole array -- so a cron job's
+        ``send_message`` reaches this session too.
+        """
+        _write_spec(
+            agents_dir,
+            servers={"foo": {"command": "/bin/foo", "disabledTools": ["danger"]}},
+            tools=["@foo"],
+        )
+        original = {"permissions": {"allow": ["mcp__foo__write"]}}
+        path = self._project_owned_settings(tmp_path, original)
+        # The checked-in project tier carries an allow rule of its own.
+        (tmp_path / ".claude" / "settings.json").write_text(
+            json.dumps({"permissions": {"allow": ["mcp__foo__read"]}}), encoding="utf-8"
         )
 
         client = AcpClient(work_dir=tmp_path, agent="kirocrew", acp_backend=ACP_BACKEND_CLAUDE)
-        client._write_claude_local_settings()  # declines: the file is not Crew's
+        client._write_claude_local_settings()
         assert client._claude_settings_authored is False
+        assert json.loads(path.read_text()) == original
 
-        # No partial delivery -- the whole array is withheld, which is exactly how
-        # a claude session behaved before this array existed. Nothing regresses;
-        # it simply does not gain a tool Crew could not take back.
+        params = await self._session_new_params(client, tmp_path, monkeypatch)
+
+        assert "foo" in _by_name(params["mcpServers"])
+        options = params["_meta"]["claudeCode"]["options"]
+        # Neither project tier loads: no local, and no checked-in project file.
+        assert options["settingSources"] == ["user"]
+        assert options["allowDangerouslySkipPermissions"] is False
+        # Neither allow rule reaches the session through any channel.
+        assert "mcp__foo__write" not in json.dumps(params)
+        assert "mcp__foo__read" not in json.dumps(params)
+        # Crew's own restriction does, through the inline settings tier.
+        assert "mcp__foo__danger" in options["settings"]["permissions"]["deny"]
+        # And the project's file is still exactly the project's.
+        assert json.loads(path.read_text()) == original
+        await client._discard_claude_settings_seed()
+        client._reset_state()
+        assert json.loads(path.read_text()) == original
+
+    @pytest.mark.asyncio
+    async def test_the_substitution_retry_rebuilds_the_envelope(
+        self, tmp_path, agents_dir, monkeypatch
+    ):
+        """The retry's envelope comes from the retry's own re-seed.
+
+        The first ``session/new`` is sent before the project file exists, under
+        Crew's own seed. The file then appears, and the retry leaves it out: the
+        array it re-derives must travel with ``settingSources`` minus ``local``
+        and with the substitute model inline, never with the first attempt's
+        envelope.
+        """
+        from kiro_crew import model_registry
+
+        substitute = "global.anthropic.claude-sonnet-4-6[1m]"
+        monkeypatch.setattr(
+            model_registry,
+            "_ADVERTISED_MODELS",
+            {"claude_code": ["global.anthropic.claude-opus-5[1m]", substitute]},
+        )
+        _write_spec(agents_dir, servers={"foo": {"command": "/bin/foo"}}, tools=["@foo"])
+        client = AcpClient(
+            work_dir=tmp_path,
+            agent="kirocrew",
+            acp_backend=ACP_BACKEND_CLAUDE,
+            model="global.anthropic.claude-opus-5[1m]",
+        )
+        client._write_claude_local_settings()
+        assert client._claude_settings_authored is True
+        path = tmp_path / ".claude" / "settings.local.json"
+        sent: list[dict] = []
+
+        async def _work_dir():
+            return str(tmp_path)
+
+        async def _send(_method, params):
+            sent.append(json.loads(json.dumps(params)))
+            if len(sent) == 1:
+                # Crew's seed goes away and the project's own file takes the path.
+                client._claude_settings_authored = False
+                client._claude_settings_written = None
+                path.unlink()
+                path.write_text(
+                    json.dumps({"permissions": {"allow": ["mcp__foo__write"]}}), encoding="utf-8"
+                )
+            return len(sent)
+
+        async def _wait(_rid, **_kw):
+            if len(sent) == 1:
+                client._last_substitution_model = substitute
+                return {}
+            return {"sessionId": "s-1"}
+
+        monkeypatch.setattr(client, "_session_work_dir", _work_dir)
+        monkeypatch.setattr(client, "_send_request", _send)
+        monkeypatch.setattr(client, "_wait_for_response", _wait)
+        await client._new_session_following_substitution()
+
+        assert len(sent) == 2
+        assert sent[0]["_meta"] == {"claudeCode": {"options": {}}}
+        retry = sent[1]
+        assert "foo" in _by_name(retry["mcpServers"])
+        options = retry["_meta"]["claudeCode"]["options"]
+        assert options["settingSources"] == ["user"]
+        assert options["settings"]["model"] == substitute
+        assert "mcp__foo__write" not in json.dumps(retry)
+
+    @pytest.mark.asyncio
+    async def test_a_crew_authored_seed_keeps_every_setting_source(
+        self, tmp_path, agents_dir, monkeypatch
+    ):
+        """The normal case is unchanged: Crew's own file IS the local tier."""
+        _write_spec(agents_dir, servers={"foo": {"command": "/bin/foo"}}, tools=["@foo"])
+        client = self._seeded(tmp_path, agent="kirocrew", acp_backend=ACP_BACKEND_CLAUDE)
+        params = await self._session_new_params(client, tmp_path, monkeypatch)
+        assert "foo" in _by_name(params["mcpServers"])
+        assert params["_meta"] == {"claudeCode": {"options": {}}}
+
+    @staticmethod
+    def _pin_harness(client, monkeypatch, *, fail=False):
+        """Record the requests the pin sends; optionally make ``set_mode`` fail."""
+        sent: list[tuple[str, dict]] = []
+        killed: list[bool] = []
+
+        async def _send(method, params):
+            sent.append((method, params))
+            return len(sent)
+
+        async def _wait(_rid, **_kw):
+            if fail:
+                raise client_mod.AcpError("set_mode refused")
+            return {}
+
+        async def _kill(*, force=False):
+            killed.append(force)
+
+        monkeypatch.setattr(client, "_send_request", _send)
+        monkeypatch.setattr(client, "_wait_for_response", _wait)
+        monkeypatch.setattr(client, "_kill_process", _kill)
+        return sent, killed
+
+    def _excluded_client(self, tmp_path, agents_dir, payload):
+        _write_spec(agents_dir, servers={"foo": {"command": "/bin/foo"}}, tools=["@foo"])
+        self._project_owned_settings(tmp_path, payload)
+        client = AcpClient(work_dir=tmp_path, agent="kirocrew", acp_backend=ACP_BACKEND_CLAUDE)
+        client._write_claude_local_settings()
+        assert "foo" in _by_name(client._session_mcp_servers())
+        return client
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["bypassPermissions", "auto", "acceptEdits", "plan", None])
+    async def test_a_session_not_started_in_the_asking_mode_is_pinned(
+        self, tmp_path, agents_dir, monkeypatch, mode
+    ):
+        """The mode is read back from the harness, never from the mutable file.
+
+        claude-agent-acp picks the starting mode from every settings file itself.
+        So whatever the session reports -- or fails to report -- it is pinned to
+        the asking mode before the first prompt.
+        """
+        client = self._excluded_client(tmp_path, agents_dir, {"permissions": {}})
+        sent, killed = self._pin_harness(client, monkeypatch)
+        resp = {"sessionId": "s-1"}
+        if mode is not None:
+            resp["modes"] = {"currentModeId": mode}
+        await client._pin_claude_starting_mode(resp)
+        assert sent == [("session/set_mode", {"sessionId": "s-1", "modeId": "default"})]
+        assert killed == []
+
+    @pytest.mark.asyncio
+    async def test_a_session_already_asking_is_left_alone(self, tmp_path, agents_dir, monkeypatch):
+        client = self._excluded_client(tmp_path, agents_dir, {"permissions": {}})
+        sent, _ = self._pin_harness(client, monkeypatch)
+        await client._pin_claude_starting_mode(
+            {"sessionId": "s-1", "modes": {"currentModeId": "default"}}
+        )
+        assert sent == []
+
+    @pytest.mark.asyncio
+    async def test_a_pin_that_fails_stops_the_session(self, tmp_path, agents_dir, monkeypatch):
+        """Crew's tools never run under a mode that approves on its own."""
+        client = self._excluded_client(tmp_path, agents_dir, {"permissions": {}})
+        _sent, killed = self._pin_harness(client, monkeypatch, fail=True)
+        with pytest.raises(client_mod.AcpError, match="pin the asking permission mode"):
+            await client._pin_claude_starting_mode(
+                {"sessionId": "s-1", "modes": {"currentModeId": "acceptEdits"}}
+            )
+        assert killed == [True]
+
+    @pytest.mark.asyncio
+    async def test_a_file_swapped_after_the_check_cannot_keep_an_approving_mode(
+        self, tmp_path, agents_dir, monkeypatch
+    ):
+        """A safe file at check time, an approving one at session/new.
+
+        The array ships, because nothing about it depends on the file. The mode
+        the swapped file picked comes back on the response and is pinned; if the
+        pin fails the session is stopped, so it never ends with Crew's tools
+        mounted under an approving mode.
+        """
+        client = self._excluded_client(
+            tmp_path, agents_dir, {"permissions": {"defaultMode": "default"}}
+        )
+        path = tmp_path / ".claude" / "settings.local.json"
+        params = await self._session_new_params(client, tmp_path, monkeypatch)
+        path.write_text(
+            json.dumps({"permissions": {"defaultMode": "bypassPermissions"}}), encoding="utf-8"
+        )
+        assert "foo" in _by_name(params["mcpServers"])
+        # Bypass cannot even be the starting mode.
+        assert params["_meta"]["claudeCode"]["options"]["allowDangerouslySkipPermissions"] is False
+
+        sent, killed = self._pin_harness(client, monkeypatch)
+        await client._pin_claude_starting_mode(
+            {"sessionId": "s-1", "modes": {"currentModeId": "acceptEdits"}}
+        )
+        assert sent == [("session/set_mode", {"sessionId": "s-1", "modeId": "default"})]
+
+        _sent, killed = self._pin_harness(client, monkeypatch, fail=True)
+        with pytest.raises(client_mod.AcpError):
+            await client._pin_claude_starting_mode(
+                {"sessionId": "s-1", "modes": {"currentModeId": "acceptEdits"}}
+            )
+        assert killed == [True]
+
+    @pytest.mark.asyncio
+    async def test_a_crew_authored_session_gains_no_pin(self, tmp_path, agents_dir, monkeypatch):
+        _write_spec(agents_dir, servers={"foo": {"command": "/bin/foo"}}, tools=["@foo"])
+        client = self._seeded(tmp_path, agent="kirocrew", acp_backend=ACP_BACKEND_CLAUDE)
+        client._session_mcp_servers()
+        sent, _ = self._pin_harness(client, monkeypatch)
+        await client._pin_claude_starting_mode(
+            {"sessionId": "s-1", "modes": {"currentModeId": "acceptEdits"}}
+        )
+        assert sent == []
+
+    def test_both_session_establishment_paths_reach_the_pin(self):
+        """session/new and a successful session/load each read back and pin."""
+        import inspect
+
+        source = inspect.getsource(client_mod.AcpClient._initialize_session)
+        assert source.count("await self._pin_claude_starting_mode(") == 2
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "not json",
+            "[]",
+            json.dumps({"permissions": {"defaultMode": "bypassPermissions"}}),
+        ],
+    )
+    def test_the_project_file_is_never_read_to_decide(self, tmp_path, agents_dir, raw):
+        """Any regular project file is left out, whatever it holds."""
+        _write_spec(agents_dir, servers={"foo": {"command": "/bin/foo"}}, tools=["@foo"])
+        path = tmp_path / ".claude" / "settings.local.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(raw, encoding="utf-8")
+        client = AcpClient(work_dir=tmp_path, agent="kirocrew", acp_backend=ACP_BACKEND_CLAUDE)
+        client._write_claude_local_settings()
+        assert "foo" in _by_name(client._session_mcp_servers())
+        assert client._claude_session_meta()["claudeCode"]["options"]["settingSources"] == ["user"]
+
+    def test_a_requested_mode_still_withholds_the_array(self, tmp_path, agents_dir):
+        """A mode Crew asked for cannot be pinned without the local file."""
+        _write_spec(agents_dir, servers={"foo": {"command": "/bin/foo"}}, tools=["@foo"])
+        self._project_owned_settings(tmp_path, {"permissions": {"allow": ["mcp__foo__write"]}})
+        client = AcpClient(
+            work_dir=tmp_path,
+            agent="kirocrew",
+            acp_backend=ACP_BACKEND_CLAUDE,
+            permission_mode="auto",
+        )
+        client._write_claude_local_settings()
         assert client._session_mcp_servers() == []
-        assert client._write_claude_local_settings() is None
-        assert path.read_text() == json.dumps({"permissions": {"allow": ["mcp__foo__write"]}})
+        assert client._claude_session_meta() == {"claudeCode": {"options": {}}}
+
+    def test_a_symlinked_project_file_still_withholds_the_array(self, tmp_path, agents_dir):
+        _write_spec(agents_dir, servers={"foo": {"command": "/bin/foo"}}, tools=["@foo"])
+        target = tmp_path / "elsewhere.json"
+        target.write_text(json.dumps({"permissions": {}}), encoding="utf-8")
+        path = tmp_path / ".claude" / "settings.local.json"
+        path.parent.mkdir(parents=True)
+        path.symlink_to(target)
+        client = AcpClient(work_dir=tmp_path, agent="kirocrew", acp_backend=ACP_BACKEND_CLAUDE)
+        client._write_claude_local_settings()
+        assert client._session_mcp_servers() == []
+        assert client._claude_session_meta() == {"claudeCode": {"options": {}}}
 
     def test_the_cached_array_is_not_aliased_to_callers(self, tmp_path, agents_dir):
         # The two call sites splat this list into their params; handing out the
