@@ -5,9 +5,11 @@
  * composer itself, an approval bar, the follow-up chips, a tip or suggestion
  * card, the queue, the memory chip, the jump-to-bottom button), the mobile
  * Settings search capsule, the notification panes (the in-app banner, the
- * bell popover's rows and controls card) and the list panels' search field
- * (Sessions sidebar, Crew Members roster; components/SearchFilterBar.tsx) wear
- * the SAME material, from the SAME primitive:
+ * bell popover's rows and controls card), the list panels' search field
+ * (Sessions sidebar, Crew Members roster; components/SearchFilterBar.tsx) and
+ * the crewmate DM header's centred identity pill (face + name;
+ * pages/members/MembersPage.tsx) wear the SAME material, from the SAME
+ * primitive:
  * `--glass-tint` over a blurred backdrop, an even top/bottom light band in
  * `--glass-band`, a 1px `--glass-edge` line down each side and a half-pixel
  * `--glass-hairline` just outside the top and bottom edges. No ring: the
