@@ -526,3 +526,41 @@ describe('the single-chat surface renders from THIS row set', () => {
     expect(duplicated).toEqual([])
   })
 })
+
+
+describe('the row a thread leaves when it ends', () => {
+  const card = msg('assistant', {
+    content: '[Thread closed]\nThe other eight',
+    meta: { thread_summary: { thread_slot: 'chat-77-1758524400', title: 'The other eight' } },
+  })
+
+  it('is claimed by the card entry, not drawn as the reply it looks like', () => {
+    expect(idFor(card)).toBe('thread_closed_card')
+    // An ordinary assistant row is untouched.
+    expect(idFor(msg('assistant', { content: 'Four are open.', meta: { mid: 'm-2' } }))).toBe('assistant')
+  })
+
+  it('opens the drawer when an anchor still claims the slot', () => {
+    const drawer = vi.fn(() => true)
+    const session = vi.fn()
+    const el = render(card, { slot: 's1', onSessionOpen: session }, {
+      threads: { summaryOf: () => undefined, onOpen: vi.fn(), onOpenSlot: drawer, crewmateName: 'Radar' },
+    }) as ReactElement<{ onOpen: () => void }>
+    el.props.onOpen()
+    expect(drawer).toHaveBeenCalledWith('chat-77-1758524400')
+    expect(session).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the full page once a later thread holds the anchor', () => {
+    // Closing frees the message, so a newer thread on it takes the anchor over and
+    // this card's slot matches nothing. The session is still there, so the card
+    // sends the reader to it rather than going inert.
+    const drawer = vi.fn(() => false)
+    const session = vi.fn()
+    const el = render(card, { slot: 's1', onSessionOpen: session }, {
+      threads: { summaryOf: () => undefined, onOpen: vi.fn(), onOpenSlot: drawer, crewmateName: 'Radar' },
+    }) as ReactElement<{ onOpen: () => void }>
+    el.props.onOpen()
+    expect(session).toHaveBeenCalledWith('chat-77-1758524400')
+  })
+})
