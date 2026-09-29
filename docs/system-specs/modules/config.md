@@ -2977,7 +2977,8 @@ Examples describe outcomes (issue triage, current release notes, passing checks)
 not event triggers. The introduction explains chats, dashboards, notes and
 requests for a human decision; it does not promise uninterrupted execution.
 The daily schedule accepts a minute-precision `HH:mm` time, defaulting to
-`09:00`, with the browser's IANA timezone displayed beside it. That zone is
+`09:00`, with the browser's IANA timezone displayed beside it. Daily jobs set
+`strict_schedule: true` so random jitter cannot shift the chosen time. That zone is
 captured once per opening and used for both the cron and confirmation. An
 empty or invalid daily time prevents both button and Enter submissions before
 any create request. Hourly and on-demand choices do not require a time.

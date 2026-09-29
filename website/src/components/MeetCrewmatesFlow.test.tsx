@@ -414,6 +414,16 @@ describe('MeetCrewmatesFlow', () => {
       expect(body.timezone).toBe(browserZone())
     })
 
+    it('a selected late-night time disables jitter so the run stays at that time', async () => {
+      toStep3()
+      setTime('23:30')
+      fireEvent.click(screen.getByTestId('meet-crewmates-create'))
+      await waitFor(() => expect(createCron).toHaveBeenCalledTimes(1))
+      expect(createCron.mock.calls[0][0]).toMatchObject({
+        cron: '30 23 * * *', timezone: browserZone(), strict_schedule: true,
+      })
+    })
+
     it('midnight and the last minute of the day map to their own cron fields', async () => {
       toStep3()
       setTime('00:00')
@@ -644,10 +654,10 @@ describe('MeetCrewmatesFlow', () => {
 describe('MeetCrewmatesFlow helpers', () => {
   it('scheduleFor maps the When choice to a cron body', () => {
     // Default time is 09:00.
-    expect(scheduleFor('morning', 'Asia/Shanghai')).toEqual({ cron: '0 9 * * *', timezone: 'Asia/Shanghai' })
-    expect(scheduleFor('morning', 'Europe/Berlin', '07:05')).toEqual({ cron: '5 7 * * *', timezone: 'Europe/Berlin' })
-    expect(scheduleFor('morning', 'UTC', '00:00')).toEqual({ cron: '0 0 * * *', timezone: 'UTC' })
-    expect(scheduleFor('morning', 'UTC', '23:59')).toEqual({ cron: '59 23 * * *', timezone: 'UTC' })
+    expect(scheduleFor('morning', 'Asia/Shanghai')).toEqual({ cron: '0 9 * * *', timezone: 'Asia/Shanghai', strict_schedule: true })
+    expect(scheduleFor('morning', 'Europe/Berlin', '07:05')).toEqual({ cron: '5 7 * * *', timezone: 'Europe/Berlin', strict_schedule: true })
+    expect(scheduleFor('morning', 'UTC', '00:00')).toEqual({ cron: '0 0 * * *', timezone: 'UTC', strict_schedule: true })
+    expect(scheduleFor('morning', 'UTC', '23:59')).toEqual({ cron: '59 23 * * *', timezone: 'UTC', strict_schedule: true })
     expect(scheduleFor('hourly', 'UTC')).toEqual({ every: 3600 })
     expect(scheduleFor('ask', 'UTC')).toBeNull()
     // The time is irrelevant, even when invalid, for hourly and on-demand.

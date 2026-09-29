@@ -130,11 +130,11 @@ export function scheduleFor(
   when: WhenChoice,
   timeZone: string,
   time: string = DEFAULT_DAILY_TIME,
-): { cron?: string; every?: number; timezone?: string } | null {
+): { cron?: string; every?: number; timezone?: string; strict_schedule?: boolean } | null {
   if (when === 'morning') {
     const parsed = parseDailyTime(time)
     if (!parsed) throw new Error(`invalid daily time: ${time}`)
-    return { cron: `${parsed.minute} ${parsed.hour} * * *`, timezone: timeZone }
+    return { cron: `${parsed.minute} ${parsed.hour} * * *`, timezone: timeZone, strict_schedule: true }
   }
   if (when === 'hourly') return { every: 3600 }
   return null
