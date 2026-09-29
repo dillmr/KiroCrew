@@ -112,30 +112,40 @@ def _matcher_ok(matcher: object) -> bool:
 
 
 def _matcher_names_a_kas_tool(matcher: str) -> bool:
-    """Whether ``matcher`` can match any name in the kiro-cli/KAS tool table."""
+    """Whether ``matcher`` can match any name in the kiro-cli/KAS/goose/opencode tables."""
     # circular import: the ACP layer imports the config loader, which sits below
     # this module; resolved at call time like the other driver seams here.
+    from kiro_crew.acp.harness_tool_names import HARNESS_TOOL_MATCH_VOCABULARY
     from kiro_crew.acp.kas_permissions import KAS_TOOL_MATCH_VOCABULARY
     from kiro_crew.hooks import _tool_matches
 
-    return matcher == "*" or any(_tool_matches(matcher, name) for name in KAS_TOOL_MATCH_VOCABULARY)
+    vocabulary = KAS_TOOL_MATCH_VOCABULARY | HARNESS_TOOL_MATCH_VOCABULARY
+    return matcher == "*" or any(_tool_matches(matcher, name) for name in vocabulary)
 
 
 def spec_hook_tool_names(tool_id: str) -> tuple[str, ...] | None:
-    """The names a spec hook's tool matcher meets for a KAS call to ``tool_id``.
+    """The names a spec hook's tool matcher meets for a call the harness named ``tool_id``.
 
-    :func:`kiro_crew.acp.kas_permissions.kas_tool_match_names` of the id, read
-    through this module because application code reaches the ACP layer only via
-    ``agent_sdk``. ``None`` when KAS named no tool, so the caller keeps matching on
-    the call's title, as for a Hooks-page hook, rather than treating the hook as
-    not applying.
+    A goose or opencode id is qualified by its backend (``goose#shell``) and read
+    through that backend's table
+    (:func:`kiro_crew.acp.harness_tool_names.harness_tool_match_names`); any other id
+    is KAS's own, read through
+    :func:`kiro_crew.acp.kas_permissions.kas_tool_match_names`. Both are read through
+    this module because application code reaches the ACP layer only via
+    ``agent_sdk``. ``None`` when the harness named no tool, so the caller keeps
+    matching on the call's title, as for a Hooks-page hook, rather than treating
+    the hook as not applying.
     """
     if not tool_id:
         return None
     # circular import: the ACP layer imports the config loader, which sits below
     # this module; resolved at call time like the other driver seams here.
+    from kiro_crew.acp.harness_tool_names import harness_tool_match_names
     from kiro_crew.acp.kas_permissions import kas_tool_match_names
 
+    harness_names = harness_tool_match_names(tool_id)
+    if harness_names is not None:
+        return harness_names
     return kas_tool_match_names(tool_id)
 
 
@@ -176,24 +186,24 @@ def _hook(agent_id: str, event: str, index: int, entry: dict, timeout: int) -> S
         and matcher
         and not _matcher_names_a_kas_tool(matcher)
     ):
-        # Kept, not dropped: the matcher still meets a KAS id of that name (an MCP
-        # tool, a built-in the table has no row for), and dropping it would retire
-        # a guard KAS can serve. Said once, since a kiro-cli-only name (``use_aws``)
-        # never meets a KAS call.
+        # Kept, not dropped: the matcher still meets a harness tool of that name (an
+        # MCP tool, a built-in no table has a row for), and dropping it would retire
+        # a guard the harness can serve. Said once, since a kiro-cli-only name
+        # (``use_aws``) never meets a harness call.
         logger.warning(
-            "agent %r: spec hook matcher %s on %s names no tool in Crew's kiro-cli/KAS "
-            "table; it runs only for a KAS tool id it matches as written",
+            "agent %r: spec hook matcher %s on %s names no tool in Crew's tool tables; "
+            "it runs only for a harness tool id it matches as written",
             agent_id,
             _diagnostic(matcher),
             _diagnostic(event),
         )
     if event == HOOK_EVENT_POST_TOOL_USE and isinstance(matcher, str) and matcher not in ("", "*"):
-        # KAS's tool-call frames name no tool, so a PostToolUse is matched on the
-        # call's title, which a kiro-cli tool name rarely matches. Said once here
-        # rather than left to miss silently.
+        # A finished call reaches the turn loop with no harness tool id, so a
+        # PostToolUse is matched on the call's title, which a kiro-cli tool name
+        # rarely matches. Said once here rather than left to miss silently.
         logger.warning(
-            "agent %r: spec postToolUse matcher %s is compared with the KAS call's "
-            "title, since KAS names no tool on a finished call",
+            "agent %r: spec postToolUse matcher %s is compared with the call's "
+            "title, since the harness names no tool on a finished call",
             agent_id,
             _diagnostic(matcher),
         )
