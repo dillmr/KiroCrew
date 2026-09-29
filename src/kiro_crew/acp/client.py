@@ -4746,6 +4746,10 @@ async def _push_model_via_effort_split(driver: Any, backend: str, model_id: str)
     effort, which this id does not overclaim), and ``""`` when the model half was
     refused too -- the caller's exhaustion path then decides. Ids without an
     effort suffix (and ``[1m]`` window ids) return ``""`` without a write.
+
+    The bare-model outcome is also recorded as ``driver.model_pin_partial``: the
+    pin did not fully apply, but its base model runs, so a caller billing by the
+    pin bills that base instead of the suffixed id.
     """
     if backend not in ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS:
         return ""
@@ -4781,6 +4785,7 @@ async def _push_model_via_effort_split(driver: Any, backend: str, model_id: str)
             effort_option,
             _effort_log,
         )
+        driver.model_pin_partial = applied_base
         return applied_base
     try:
         await driver.set_config_option(effort_option, effort)
@@ -4795,6 +4800,7 @@ async def _push_model_via_effort_split(driver: Any, backend: str, model_id: str)
             _base_log,
             _effort_log,
         )
+        driver.model_pin_partial = applied_base
         return applied_base
     return model_id
 
@@ -6038,6 +6044,14 @@ class AcpClient:
         # model the gateway will actually serve (the advisory carries no
         # sessionId, so the first attempt creates nothing). None = no substitution.
         self._last_substitution_model: str | None = None
+        # The pinned model a startup config-option push was refused on, or
+        # ``""``. That push is non-strict, so a refusal leaves the session on
+        # the backend default without raising. Callers that bill or label a
+        # turn by the pin read this to learn the pin never ran.
+        self.model_pin_refused: str = ""
+        # The bare model a ``<model>[<effort>]`` pin landed as when its effort
+        # half was refused, or ``""``. Set by ``_push_model_via_effort_split``.
+        self.model_pin_partial: str = ""
         self._child_pids: dict[int, ChildRecord] = {}  # pid → (start_time, basename)
         self.last_prompt_stats = AcpPromptStats()
         self._tool_call_inputs: dict[str, str] = {}
@@ -8603,6 +8617,7 @@ class AcpClient:
                 {"sessionId": self._session_id, "modelId": model_id},
             )
         self._model = model_id
+        self.model_pin_refused = ""
         self._resolved_model_id = self._last_substitution_model or model_id
         if self._seeds_local_settings:
             # Re-seed the per-session settings file: a pooled runtime seeded it at
@@ -8786,6 +8801,8 @@ class AcpClient:
         it re-raised, the session init failed, and a stale model pin from another
         backend killed every codex session at startup.
         """
+        # Each push describes only itself; the split below sets it again.
+        self.model_pin_partial = ""
         last_exc: AcpError | None = None
         for cand in self._model_config_candidates(model_id):
             try:
@@ -9005,9 +9022,12 @@ class AcpClient:
                 # Every spelling refused: record the session as running the
                 # default (the warm-pool re-apply path reads this field, so
                 # leaving the refused id here would re-offer it every claim)
-                # and let session/new's own model stand.
+                # and let session/new's own model stand. Remember the refused
+                # pin so a caller billing by it can tell it never ran.
+                self.model_pin_refused = self._model
                 self._model = DEFAULT_MODEL
                 return
+            self.model_pin_refused = ""
             self._model = sent
         else:
             await self._send_request(

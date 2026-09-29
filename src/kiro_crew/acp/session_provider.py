@@ -1155,6 +1155,16 @@ class AcpSessionProvider(LLMProvider):
         self._handle._model = value
 
     @property
+    def model_pin_refused(self) -> str:
+        """The model a non-strict push was refused on — see the handle's field."""
+        return self._handle.model_pin_refused
+
+    @property
+    def model_pin_partial(self) -> str:
+        """The bare model a pair pin landed as — see the handle's field."""
+        return self._handle.model_pin_partial
+
+    @property
     def served_model(self) -> str:
         """Backend-resolved model id serving this session (``""`` until known).
 

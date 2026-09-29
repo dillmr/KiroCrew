@@ -1254,6 +1254,13 @@ class AcpSessionHandle:
         # (mirrors AcpClient._resolved_model_id; avoids the profile-id
         # pinning trap where a resolved profile id poisons slot.model).
         self._resolved_model_id: str = ""
+        # The model a non-strict config-option push was refused on, or ``""``
+        # (mirrors AcpClient.model_pin_refused). The refusal stays on the
+        # backend default without raising, so this is the only trace of it.
+        self.model_pin_refused: str = ""
+        # The bare model a pair pin landed as when its effort was refused
+        # (mirrors AcpClient.model_pin_partial).
+        self.model_pin_partial: str = ""
         self._config_options: list[dict[str, Any]] = []
         self._available_models: list[dict[str, str]] = []
         # Read-path revalidation bookkeeping (see maybe_refresh_available_models).
@@ -2387,6 +2394,7 @@ class AcpSessionHandle:
             # backend default", the same answer an unresolvable id gets above.
             applied = await self._push_model_config_option(resolved, strict=False)
             if not applied:
+                self.model_pin_refused = resolved
                 return
             # Record the spelling that actually went on the wire, not the one
             # asked for: the context meter looks the window up by this id, and a
@@ -2409,6 +2417,7 @@ class AcpSessionHandle:
                 set_model_params(self._session_id, resolved),
             )
         self._model = resolved
+        self.model_pin_refused = ""
         # Parity with AcpClient.set_model: keep _resolved_model_id in sync so
         # _backfill_context_window looks up the NEW model's window after a switch
         # (otherwise the context meter converts pct against the stale session/new
@@ -2452,6 +2461,8 @@ class AcpSessionHandle:
         reporting success while running something else is worse than failing.
         ``strict=False`` (a substitute or inherited value) returns ``""``.
         """
+        # Each push describes only itself; the split below sets it again.
+        self.model_pin_partial = ""
         last_exc: AcpError | None = None
         # ONE home for the spelling ladder, imported rather than copied: the
         # order is a fact about how a model id is spelled on the wire, not about

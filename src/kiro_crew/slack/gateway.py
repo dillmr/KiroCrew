@@ -214,6 +214,8 @@ from kiro_crew.llm_helpers import (
     configured_fallback_chain,
     provider_fallback_active,
     provider_last_turn_usage,
+    provider_model_pin_partial,
+    provider_model_pin_refused,
     save_conversation_turn_off_loop,
     stream_and_collect,
     transient_retry_delay,
@@ -5591,7 +5593,15 @@ class GatewayOrchestrator:
                         extra_env=_cron_extra_env(),
                         cwd=cwd,
                     )
-                    return client, is_new, resumed, False
+                    # A config-option backend refuses a pin without raising and
+                    # stays on its default: the same downgrade as the except
+                    # below, so report it the same way.
+                    return (
+                        client,
+                        is_new,
+                        resumed,
+                        bool(job.model) and provider_model_pin_refused(client),
+                    )
                 except Exception as model_exc:
                     if not job.model:
                         raise
@@ -5750,10 +5760,16 @@ class GatewayOrchestrator:
                                 # requested id would attribute spend to a model
                                 # that never executed. Blank defers to
                                 # model_source, which reports what actually ran.
+                                # A half-applied pair pin bills the bare
+                                # model that ran, not the suffixed pin.
                                 (
                                     ""
                                     if (_seq_downgraded or provider_fallback_active(client))
-                                    else (job.model or "")
+                                    else (
+                                        (job.model and provider_model_pin_partial(client))
+                                        or job.model
+                                        or ""
+                                    )
                                 ),
                                 _turn_usage,
                                 provider=(
@@ -5955,11 +5971,16 @@ class GatewayOrchestrator:
                     await persist_token_record_async(
                         session_key,
                         # Blank on a downgrade or an active fallback — see the
-                        # sequential site above / provider_fallback_active.
+                        # sequential site above / provider_fallback_active. A
+                        # half-applied pair pin bills the bare model that ran.
                         (
                             ""
                             if (_model_downgraded or provider_fallback_active(client))
-                            else (job.model or "")
+                            else (
+                                (job.model and provider_model_pin_partial(client))
+                                or job.model
+                                or ""
+                            )
                         ),
                         _turn_usage,
                         provider=_provider,

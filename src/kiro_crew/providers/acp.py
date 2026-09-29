@@ -567,6 +567,26 @@ class AcpProvider(LLMProvider):
                 pass
 
     @property
+    def model_pin_refused(self) -> str:
+        """The pinned model the adapter refused at startup, or ``""``.
+
+        Both client shapes carry the field: a raw ``AcpClient`` sets it in its
+        startup model push, and an ``AcpSessionProvider`` delegates to its
+        handle's ``set_model``.
+        """
+        value = self._client.model_pin_refused
+        return value if isinstance(value, str) else ""
+
+    @property
+    def model_pin_partial(self) -> str:
+        """The bare model a ``<model>[<effort>]`` pin landed as, or ``""``.
+
+        Set when the base model applied but its effort half did not.
+        """
+        value = self._client.model_pin_partial
+        return value if isinstance(value, str) else ""
+
+    @property
     def served_model(self) -> str:
         """Model id the live session resolved (public — see LLMProvider).
 

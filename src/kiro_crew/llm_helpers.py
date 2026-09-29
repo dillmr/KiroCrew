@@ -459,6 +459,33 @@ def provider_fallback_active(provider: Any) -> bool:
     return isinstance(marker, (tuple, list)) and len(marker) >= 2
 
 
+def provider_model_pin_refused(provider: LLMProvider) -> bool:
+    """True when *provider*'s adapter refused its pinned model at startup.
+
+    A config-option backend applies a pin non-strictly: a refusal leaves the
+    session on the backend default and raises nothing. The session records the
+    refused id as ``model_pin_refused``. Callers treat a True here exactly as a
+    caught model-unavailable error: annotate the downgrade and blank the
+    explicit pin on the usage row.
+    """
+    # Declared on LLMProvider. The str check keeps a test double's auto-made
+    # attribute from reading as a refusal.
+    value = provider.model_pin_refused
+    return isinstance(value, str) and bool(value)
+
+
+def provider_model_pin_partial(provider: LLMProvider) -> str:
+    """The bare model *provider* runs when its pair pin only half applied.
+
+    A ``<model>[<effort>]`` pin is applied as two writes. When the model lands
+    and the effort does not, the session runs the bare model, not the pin and
+    not the default. Returns that bare model, or ``""``. A caller billing by the
+    pin bills this value instead.
+    """
+    value = provider.model_pin_partial
+    return value if isinstance(value, str) else ""
+
+
 def next_fallback_candidate(
     chain: Sequence[str],
     active_model: str,
