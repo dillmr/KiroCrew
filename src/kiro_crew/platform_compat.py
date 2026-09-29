@@ -1117,6 +1117,36 @@ def open_lock_file(path: "str | os.PathLike[str]") -> Iterator[int]:
         os.close(fd)
 
 
+def open_create_or_existing(
+    path: "str | os.PathLike[str]",
+    flags: int,
+    mode: int = 0o644,
+    *,
+    dir_fd: int | None = None,
+) -> int:
+    """Open *path*, creating it when absent, race-safe against a sibling creator.
+
+    A nonexclusive ``O_CREAT`` open of an absent name can come back ``ENOENT``
+    on Darwin when two callers race to create it -- the create is not the atomic
+    "make or find" the flag reads as. So the name is created EXCLUSIVELY first
+    and, when a sibling already made it, opened again WITHOUT ``O_CREAT`` so the
+    sibling's inode is the one both hold. A leaf that vanishes between those two
+    calls is a genuine ``ENOENT``, left to the caller: recreating it here would
+    hand two writers two different inodes under one lock name.
+
+    *flags* carries everything but the create bits (``O_RDWR``, ``O_NOFOLLOW``,
+    ``O_APPEND``, ...). *dir_fd* makes the open descriptor-relative, so a caller
+    that pinned the directory keeps its pin anchoring the open. Returns the raw
+    integer fd; the caller owns it. Shared by the SEL chain lock, the decision
+    log and the app-deps provisioning lock, which all hit the same race.
+    """
+    name = os.fspath(path)
+    try:
+        return os.open(name, flags | os.O_CREAT | os.O_EXCL, mode, dir_fd=dir_fd)
+    except FileExistsError:
+        return os.open(name, flags, mode, dir_fd=dir_fd)
+
+
 def acquire_lock(fd: int, *, exclusive: bool = True) -> None:
     """Low-level lock acquire for the acquire-now / release-later fd-handoff
     pattern (where a context manager does not fit).
