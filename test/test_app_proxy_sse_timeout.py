@@ -7,13 +7,17 @@ which reaches the browser as a truncated chunked response
 (``ERR_INVALID_CHUNKED_ENCODING``) rather than as an error. Only the two
 subprocess-backend apps are proxied, so no in-process app can show this.
 
-Both tests below drive the REAL handler against a REAL backend server over
-loopback, with ``_PROXY_TIMEOUT`` shortened so the assertions do not take half a
-minute:
+The loopback tests below drive the REAL handler against a REAL backend server,
+with ``_PROXY_TIMEOUT`` (and, where a test needs it, ``_PROXY_IDLE_TIMEOUT``)
+shortened so the assertions do not take half a minute:
 
 * the stream survives well past the total bound, and every event arrives;
 * a slow NON-stream response is still cut at that bound, so lifting the bound for
-  streams does not abolish it.
+  streams does not abolish it;
+* a stream whose backend goes silent is cut at the idle bound. Once the total is
+  lifted, ``sock_read`` is the only thing that ends a stalled stream, so this is
+  the guard that keeps a hung backend from holding the gateway, its upstream
+  socket and a pool slot for as long as the browser tab stays open.
 """
 
 from __future__ import annotations
@@ -29,6 +33,10 @@ from kiro_crew.apps import routes
 #: Short enough to keep the tests fast, long enough that a slow loopback hop
 #: cannot be mistaken for the bound firing.
 _BOUND = 0.4
+
+#: The idle bound under test. Shortened only in the test that needs it, so the
+#: live stream keeps the real 60s and its own pauses can never trip the guard.
+_IDLE_BOUND = _BOUND * 2
 
 #: Events the backend emits, spaced so the stream is still open after the bound.
 _EVENTS = 6
@@ -52,8 +60,17 @@ def test_only_event_stream_lifts_the_bound(content_type: str) -> None:
     assert not routes._is_event_stream(content_type)
 
 
+#: Longest the stalled backend waits for the gateway to drop it before giving up.
+#: Far past the idle bound, so a gateway that never cuts is seen as such rather
+#: than the backend simply finishing on its own.
+_STALL = _IDLE_BOUND * 5
+
+#: How often the stalled backend looks at its own connection.
+_STALL_TICK = _IDLE_BOUND / 20
+
+
 async def _backend() -> web.Application:
-    """An app backend: one event stream, one slow ordinary response."""
+    """An app backend: an event stream, a slow ordinary response, a stalled stream."""
 
     async def stream(request: web.Request) -> web.StreamResponse:
         resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
@@ -62,6 +79,34 @@ async def _backend() -> web.Application:
             await resp.write(f"data: {index}\n\n".encode())
             await asyncio.sleep(_EVENT_GAP)
         await resp.write_eof()
+        return resp
+
+    async def stall(request: web.Request) -> web.StreamResponse:
+        # One event, then silence. The backend never writes again, so it cannot
+        # learn of the cut from a failed write. It sees the drop one of two ways:
+        # ``TestServer`` runs with ``handler_cancellation`` on, so the lost
+        # connection cancels this handler; a server without it leaves the handler
+        # running with a closed transport, which the loop watches for. Either
+        # way the moment is recorded. The BACKEND side is the observable here:
+        # the client has already been sent a 200 by then, so what the cut looks
+        # like there is the relay's business, not the idle bound's.
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        await resp.write(b"data: 0\n\n")
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        dropped: asyncio.Future[float | None] = request.app["dropped"]
+        try:
+            while loop.time() - started < _STALL:
+                transport = request.transport
+                if transport is None or transport.is_closing():
+                    dropped.set_result(loop.time() - started)
+                    return resp
+                await asyncio.sleep(_STALL_TICK)
+        except asyncio.CancelledError:
+            dropped.set_result(loop.time() - started)
+            raise
+        dropped.set_result(None)
         return resp
 
     async def slow_headers(request: web.Request) -> web.Response:
@@ -76,7 +121,9 @@ async def _backend() -> web.Application:
         return web.json_response({"late": True})
 
     app = web.Application()
+    app["dropped"] = asyncio.get_running_loop().create_future()
     app.router.add_get("/api/stream", stream)
+    app.router.add_get("/api/stall", stall)
     app.router.add_get("/api/slow-headers", slow_headers)
     return app
 
@@ -149,6 +196,53 @@ async def test_a_slow_non_stream_response_is_still_cut(monkeypatch) -> None:
             assert resp.status == 504, await resp.text()
             assert (await resp.json())["error"] == "backend timeout"
             assert elapsed < _BOUND * 4, f"cut took {elapsed:.2f}s, bound is {_BOUND}s"
+        finally:
+            await gateway.close()
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_a_silent_event_stream_is_cut_at_the_idle_bound(monkeypatch) -> None:
+    """The guard that replaces the total bound for streams.
+
+    With the total lifted, ``sock_read=_PROXY_IDLE_TIMEOUT`` is all that ends a
+    stream whose backend has gone quiet. Set it to ``None`` and this test is the
+    one that goes red: the backend then keeps the connection for the whole
+    ``_STALL`` and reports it was never dropped.
+
+    Observed on the BACKEND side on purpose. By the time the cut fires, the
+    gateway has already sent the client a 200, so what the client sees is the
+    relay's mid-body failure shape and not this guard.
+    """
+    monkeypatch.setattr(routes, "_PROXY_IDLE_TIMEOUT", _IDLE_BOUND)
+    backend_app = await _backend()
+    backend = TestServer(backend_app)
+    await backend.start_server()
+    try:
+        base = f"http://127.0.0.1:{backend.port}"
+        gateway = TestClient(TestServer(await _gateway(monkeypatch, base)))
+        await gateway.start_server()
+        try:
+            resp = await gateway.get("/apps/demo/api/stall")
+            assert resp.status == 200
+            assert routes._is_event_stream(resp.headers["Content-Type"])
+            # Backstop for the test itself: with the guard gone the backend only
+            # gives up after ``_STALL``, and this must fail rather than hang.
+            async with asyncio.timeout(_STALL * 2):
+                held_for = await backend_app["dropped"]
+            assert (
+                held_for is not None
+            ), f"gateway held the silent upstream for the full {_STALL:.1f}s stall"
+            assert (
+                held_for < _IDLE_BOUND * 3
+            ), f"cut took {held_for:.2f}s, idle bound is {_IDLE_BOUND}s"
+            # It also must not have been cut by the total bound reappearing: the
+            # first event arrives at once, so the total would have fired at
+            # ``_BOUND``, well before the idle bound elapses.
+            assert (
+                held_for >= _IDLE_BOUND * 0.8
+            ), f"cut after {held_for:.2f}s, before the idle bound of {_IDLE_BOUND}s"
         finally:
             await gateway.close()
     finally:
