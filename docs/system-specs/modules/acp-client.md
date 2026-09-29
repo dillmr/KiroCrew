@@ -153,6 +153,9 @@ an existing alias whose bytes already match. MCP server env values are left out
 of that digest (env keys stay in): a launcher that writes a fresh per-write value
 into every agent file would otherwise name a new alias on every spawn, so a
 changed value reuses the alias and publication rewrites it with the full view.
+The source spec's path is in the digest too, so two agent files differing only
+in env values (one project agent copied into two workspaces, each with its own
+token) never share an alias.
 Views can still differ per
 workspace: a SCOPE_PROJECT agent's prompt path and workspace-local inheritance
 shape the view, so those agents get

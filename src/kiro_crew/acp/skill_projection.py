@@ -1710,7 +1710,10 @@ def prepare_native_skill_projection(
                 # contend for (and re-own) the same file. MCP server env VALUES
                 # are left out of the name (see _alias_identity): a tool that
                 # rewrites a fresh per-write value into every agent file would
-                # otherwise mint a new alias on every spawn.
+                # otherwise mint a new alias on every spawn. The source spec's
+                # path is in the name instead, so two agent files that differ
+                # only in env values -- the same project agent copied into two
+                # workspaces with its own token each -- never share one alias.
                 ownership: dict[str, dict[str, Any]] = {}
                 for agent_name, view in list(specs.items()):
                     view.pop("name", None)
@@ -1719,6 +1722,7 @@ def prepare_native_skill_projection(
                             {
                                 "agent": agent_name,
                                 "home": crew_home_id,
+                                "source": sources[agent_name],
                                 "view": _alias_identity(view),
                             },
                             ensure_ascii=False,
