@@ -1468,7 +1468,7 @@ export interface SubagentActivity {
   result?: string
 }
 
-/** Where `clampToolOutput` (store/chatSlice.ts) removed the middle of a tool
+/** Where `clampToolOutput` (wire.ts in store/chat) removed the middle of a tool
  *  payload: the stored string is `head + '\n' + tail`, `at` is the offset of
  *  the tail (right after that newline) and `count` is how many characters were
  *  dropped between the two. Renderers put the localized marker there at view

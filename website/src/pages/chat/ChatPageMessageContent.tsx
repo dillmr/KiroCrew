@@ -163,12 +163,12 @@ export function ChatHeaderMenu({ activeSlot, agent, onReveal, onRename, onAutoTi
 
 /** Per-message identity key with row-id tie-break. `msgKey` alone is NOT
  *  unique — a coarse OS clock can stamp two rows appended in one tick with the
- *  same `ts` (see isRedeliveredMessage in chatSlice on why row identity is
- *  `meta.mid`, not a ts tuple). `mid` is stamped once per row and survives
- *  every delivery door (HTTP rebuild, WS broadcast, JSONL round trip), so the
- *  suffix is as reload-stable as the key it disambiguates. Rows without a
- *  `mid` (locally-minted streaming/optimistic bubbles) fall back to `msgKey`
- *  alone, which is exactly the uniqueness they had before. */
+ *  same `ts` (see isRedeliveredMessage in transcript.ts under store/chat on
+ *  why row identity is `meta.mid`, not a ts tuple). `mid` is stamped once per
+ *  row and survives every delivery door (HTTP rebuild, WS broadcast, JSONL
+ *  round trip), so the suffix is as reload-stable as the key it disambiguates.
+ *  Rows without a `mid` (locally-minted streaming/optimistic bubbles) fall
+ *  back to `msgKey` alone, which is exactly the uniqueness they had before. */
 /** Client-generated one-shot correlation id for an optimistic user bubble; see
  *  `mintSendId` in `utils/sendDelivery`. Re-exported so the page and the tests
  *  keep their import path. */

@@ -1,8 +1,9 @@
 /**
  * Behavioural coverage for the shared dashboard API client (`src/api/client.ts`).
  *
- * `client.ts` is one transport layer plus ~450 thin typed methods over it. What
- * can actually break here is (a) the transport contract — session-key header,
+ * `client.ts` is one transport layer plus the `api` object of thin typed methods
+ * over it, most of them defined by domain in `src/api/client/*.ts`. What can
+ * actually break here is (a) the transport contract — session-key header,
  * auth recovery, `ApiError` + error journalling, artifact-write tracking — and
  * (b) URL/body CONSTRUCTION in the methods that are not one-liners: query
  * builders, conditionally-omitted body keys, path encoding, the SSE reader, the

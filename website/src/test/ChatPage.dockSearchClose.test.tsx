@@ -360,10 +360,10 @@ describe('virtualKeyFor — #253 stability extended to the virtualizer/HeightCac
   it('two sibling groups whose leads share a coarse-clock ts get DISTINCT keys (mid tie-break)', () => {
     const msgKey = makeMsgKey()
     // The reducer explicitly supports distinct rows stamped in the same OS
-    // tick (see isRedeliveredMessage in chatSlice) — row identity is meta.mid.
-    // The index key this change replaces was unique by construction; the mid
-    // tie-break keeps that property so sibling groups never alias each
-    // other's HeightCache entry or React key.
+    // tick (see isRedeliveredMessage in transcript.ts under store/chat) — row
+    // identity is meta.mid. The index key this change replaces was unique by
+    // construction; the mid tie-break keeps that property so sibling groups
+    // never alias each other's HeightCache entry or React key.
     const a: DisplayItem = {
       kind: 'group',
       msgs: [{ role: 'tool', content: '🔧 grep', cls: '', ts: 'tick-7', meta: { mid: 'm-1' } }],
