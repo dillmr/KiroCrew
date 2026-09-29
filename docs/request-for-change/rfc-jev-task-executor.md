@@ -1,11 +1,11 @@
 ---
 title: Jev task executor — closed browser and desktop subtasks without an LLM in the loop
-status: draft
+status: accepted
 author: Ray Xu
 created: 2026-09-28
-last-audited: 2026-09-28
-audited-at: 699083f906
-doc-pr: null
+last-audited: 2026-09-29
+audited-at: df0ea7909c
+doc-pr: 14839
 implementation-prs: []
 tracking-issues: []
 supersedes: []
@@ -20,8 +20,13 @@ superseded-by: []
 - Prior art: [JevOnly](https://github.com/buluoray/JevOnly), a standalone harness
   that drives a browser and a desktop app with Jev as the only model.
 
-Status: draft. Nothing of this design is on main. Code references were read at
-`699083f906`.
+Status: accepted on 2026-09-29, recorded by the maintainer approval of the PR
+that sets this status. The acceptance answers §7 questions 1 and 2 as proposed:
+the executor sits below the tenet 8 line as a trust-boundary component, and the
+browser surface waits on its own driver design section (§3.6), with desktop as
+the phase 1 surface. Questions 3 and 4 stay open and are settled in the
+implementation PRs for steps 4 and 5. Nothing of this design is on main. Code
+references were read at `699083f906` and re-read at `df0ea7909c`.
 
 ## 1. Problem
 
