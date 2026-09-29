@@ -144,6 +144,7 @@ from kiro_crew.dashboard.handlers.autonudge import (
     compose_nudge_body,
     render_nudge_message,
 )
+from kiro_crew.dashboard.handlers.updates import _update_info
 from kiro_crew.dashboard.handlers.updates import remediation_command as _remediation_command
 from kiro_crew.dashboard.handlers.usage import (
     persist_token_record_async,
@@ -300,6 +301,7 @@ from kiro_crew.platform.update_capability import (
     CHECK_SUCCEEDED,
     CHECK_UNCHECKED,
     EXTERNALLY_MANAGED_STAMPS,
+    MANAGED_BY_COMMAND,
 )
 from kiro_crew.platform.update_governance import (
     commits_ahead,
@@ -12622,6 +12624,9 @@ class GatewayOrchestrator:
 
         assert isinstance(provider, UpdateProvider)
 
+        # Say who owns updates on every path, "already latest" included, so the
+        # dashboard need not run its own check to learn it.
+        _update_info["managed_by"] = MANAGED_BY_COMMAND
         result = await provider.check()
 
         # The mandatory floor is an enterprise ceiling and is evaluated FIRST,
